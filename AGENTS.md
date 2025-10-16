@@ -75,13 +75,12 @@ tests/
 - ユニットテスト: 各関数・メソッド単体
 - 統合テスト: DB + Service 層の統合
 
-テスト実行:
+テスト実行（mise タスク経由が標準）:
 ```bash
-bun test              # 全テスト実行
-bun test --watch      # Watch mode
-bun test --coverage   # カバレッジ
+mise run test              # 全テスト実行
+mise run test:watch        # Watch mode
+mise run test:coverage     # カバレッジ
 ```
-
 ### データベース
 
 **SQLite スキーマ**

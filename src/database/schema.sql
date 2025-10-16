@@ -1,0 +1,1 @@
+-- TODO(#5): notification_rules テーブル定義を追加

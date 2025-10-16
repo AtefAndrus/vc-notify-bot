@@ -1021,20 +1021,22 @@ describe("E2E: VC Join Notification", () => {
 
 ### 7.5 テスト実行
 
+プロジェクトの公式テスト手順は mise タスク経由で統一する。
+
 ```bash
 # 全テスト実行
-bun test
+mise run test
 
 # Watch mode
-bun test --watch
+mise run test:watch
 
 # カバレッジ
-bun test --coverage
+mise run test:coverage
 
-# 特定ファイル
+# 特定ファイル（ローカル確認用の直接実行例）
 bun test tests/database/repository.test.ts
 
-# タイムアウト指定
+# タイムアウト指定（必要に応じて直接実行）
 bun test --timeout 10000
 ```
 
