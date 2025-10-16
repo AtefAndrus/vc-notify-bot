@@ -96,13 +96,24 @@ vc-notify-bot/
 ├── docs/
 │   └── SPECIFICATION.md    # 詳細仕様
 ├── src/                    # 実装
+│   ├── index.ts            # エントリーポイント（DI/起動処理）
+│   ├── handlers/           # Discord イベントハンドラー
+│   ├── services/           # ビジネスロジック層
+│   ├── repositories/       # 永続化層
+│   ├── database/           # マイグレーション/スキーマ
+│   └── types/              # 共通型定義
 ├── tests/                  # テスト
+│   └── unit/               # ユニットテスト
 └── Dockerfile
 ```
 
 ## 開発
 
+このプロジェクトは TDD (Test Driven Development) を前提に、テストを先に記述してから実装を進める方針です。新しい機能追加時はユニットテスト/統合テストを先に作成した上で、`mise run test` が常に成功する状態を維持してください。
+
 ### テスト実行
+
+推奨フローとして、テストは `mise run test`（mise タスク経由）で実行します。Bun 直接実行はローカル確認用のショートカットとしてのみ使用してください。
 
 ```bash
 # 全テスト
