@@ -70,19 +70,6 @@
 - [ ] 既存機能変更
 - [ ] バグ修正のみ
 
-### 対象コンポーネント
-
-<!-- 影響を受けるコンポーネントをチェックしてください -->
-
-- [ ] Collector（Node.js）
-- [ ] Processor（Python）
-- [ ] Realtime Analyzer（Python）
-- [ ] BIDS Manager（Python）
-- [ ] データベーススキーマ
-- [ ] API
-- [ ] ドキュメント
-- [ ] 設定ファイル
-
 ### データベース変更
 
 - [ ] スキーマ変更あり
