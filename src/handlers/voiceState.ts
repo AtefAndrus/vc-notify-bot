@@ -1,7 +1,11 @@
 import { VoiceState } from "discord.js";
 
+import { NotifyService } from "@/services/notifyService";
+import { RuleService } from "@/services/ruleService";
+
 export interface VoiceStateHandlerDeps {
-  // TODO(#4): ルール評価と通知サービスを注入
+  ruleService: RuleService;
+  notifyService: NotifyService;
 }
 
 export interface VoiceStateHandler {
