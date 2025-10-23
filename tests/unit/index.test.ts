@@ -148,6 +148,9 @@ describe("bootstrap", () => {
 
     expect(result.services).toBe(receivedServices);
     expect(result.notificationRuleRepository).toBeDefined();
+    expect(typeof result.cleanup).toBe("function");
+
+    result.cleanup();
   });
 
   it("ログイン失敗時にサニタイズされたログを出力する", async () => {
@@ -169,6 +172,7 @@ describe("bootstrap", () => {
           error: (message: string) => {
             logs.push(message);
           },
+          warn: () => {},
         },
       })
     ).rejects.toThrow(loginError);
