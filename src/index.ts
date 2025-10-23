@@ -2,12 +2,14 @@ import { mkdirSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
 import { Client, GatewayIntentBits } from "discord.js";
+import { Database } from "bun:sqlite";
 
 import {
   createNotificationRuleRepository,
   NotificationRuleRepository,
   NotificationRuleRepositoryDeps,
 } from "@/repositories/notificationRuleRepository";
+import { createMigrationRunner } from "@/database/migrations";
 import {
   createNotifyService,
   NotifyService,
@@ -120,6 +122,11 @@ export async function bootstrap(
   await Promise.resolve(ensureDir(config.dataDir));
 
   const logger = deps.logger ?? console;
+  const migrationRunner = createMigrationRunner({
+    dbPath: config.dbPath,
+    logger,
+  });
+  await migrationRunner.runMigrations();
   const notificationRuleRepository =
     deps.notificationRuleRepositoryFactory?.(config) ??
     createNotificationRuleRepository(createRepositoryDeps(config));
@@ -177,10 +184,12 @@ function resolveDbPath(rawPath: string | undefined): string {
 }
 
 function createRepositoryDeps(
-  _config: AppConfig
+  config: AppConfig
 ): NotificationRuleRepositoryDeps {
-  // TODO(#5): DB 接続などの依存を組み立てる
-  return {};
+  const db = new Database(config.dbPath);
+  return {
+    db,
+  };
 }
 
 function createNotifyServiceDeps(
