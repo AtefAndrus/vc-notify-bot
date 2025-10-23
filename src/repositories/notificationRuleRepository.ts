@@ -40,6 +40,7 @@ export interface NotificationRuleRepositoryDeps {
   db: Database;
   generateId?: () => string;
   getCurrentTime?: () => Date;
+  logger?: Pick<typeof console, "warn">;
 }
 
 interface NotificationRuleRow {
@@ -60,6 +61,7 @@ export function createNotificationRuleRepository(
   const generateId = deps.generateId ?? randomUUID;
   const getCurrentTime = deps.getCurrentTime ?? (() => new Date());
   const db = deps.db;
+  const logger = deps.logger;
 
   const insertStmt = db.prepare<
     never,
@@ -192,22 +194,22 @@ export function createNotificationRuleRepository(
         throw new Error("Failed to retrieve created notification rule");
       }
 
-      return mapRowToDomain(record);
+      return mapRowToDomain(record, logger);
     },
 
     async findById(id) {
       const record = selectByIdStmt.get({ $id: id });
-      return record ? mapRowToDomain(record) : null;
+      return record ? mapRowToDomain(record, logger) : null;
     },
 
     async findByGuild(guildId) {
       const rows = selectByGuildStmt.all({ $guildId: guildId });
-      return rows.map(mapRowToDomain);
+      return rows.map((row) => mapRowToDomain(row, logger));
     },
 
     async findEnabledByGuild(guildId) {
       const rows = selectEnabledByGuildStmt.all({ $guildId: guildId });
-      return rows.map(mapRowToDomain);
+      return rows.map((row) => mapRowToDomain(row, logger));
     },
 
     async updateRule(id, updates) {
@@ -230,11 +232,14 @@ export function createNotificationRuleRepository(
         throw new Error("Failed to retrieve updated notification rule");
       }
 
-      return mapRowToDomain(record);
+      return mapRowToDomain(record, logger);
     },
 
     async deleteRule(id) {
-      deleteStmt.run({ $id: id });
+      const result = deleteStmt.run({ $id: id });
+      if (result.changes === 0) {
+        throw new Error(`Notification rule not found: ${id}`);
+      }
     },
 
     async toggleEnabled(id, enabled) {
@@ -250,7 +255,7 @@ export function createNotificationRuleRepository(
       }
 
       const record = selectByIdStmt.get({ $id: id });
-      return record ? mapRowToDomain(record) : null;
+      return record ? mapRowToDomain(record, logger) : null;
     },
 
     async countByGuild(guildId) {
@@ -260,13 +265,19 @@ export function createNotificationRuleRepository(
   };
 }
 
-function mapRowToDomain(row: NotificationRuleRow): NotificationRule {
+function mapRowToDomain(
+  row: NotificationRuleRow,
+  logger?: Pick<typeof console, "warn">
+): NotificationRule {
   return {
     id: row.id,
     guildId: row.guild_id,
     name: row.name,
-    watchedVoiceChannelIds: parseJsonArray(row.watched_voice_channel_ids),
-    targetUserIds: parseJsonArray(row.target_user_ids),
+    watchedVoiceChannelIds: parseJsonArray(
+      row.watched_voice_channel_ids,
+      logger
+    ),
+    targetUserIds: parseJsonArray(row.target_user_ids, logger),
     notificationChannelId: row.notification_channel_id,
     enabled: Boolean(row.enabled),
     createdAt: new Date(row.created_at),
@@ -274,14 +285,18 @@ function mapRowToDomain(row: NotificationRuleRow): NotificationRule {
   };
 }
 
-function parseJsonArray(raw: string): string[] {
+function parseJsonArray(
+  raw: string,
+  logger?: Pick<typeof console, "warn">
+): string[] {
   try {
     const value = JSON.parse(raw);
     if (Array.isArray(value)) {
       return value.map((item) => String(item));
     }
-  } catch {
-    // fall through
+    logger?.warn?.(`JSON parsed but not an array: ${raw}`);
+  } catch (error) {
+    logger?.warn?.(`Failed to parse JSON array: ${raw}`, error);
   }
   return [];
 }

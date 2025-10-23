@@ -41,6 +41,7 @@ export interface BootstrapResult {
   config: AppConfig;
   services: ApplicationServices;
   notificationRuleRepository: NotificationRuleRepository;
+  cleanup: () => void;
 }
 
 const DEFAULT_DB_PATH = "./data/bot.db";
@@ -52,7 +53,7 @@ export interface BootstrapDependencies {
     services: ApplicationServices
   ) => MinimalClient;
   ensureDataDir?: (path: string) => void | Promise<void>;
-  logger?: Pick<typeof console, "info" | "error">;
+  logger?: Pick<typeof console, "info" | "error" | "warn">;
   notificationRuleRepositoryFactory?: (
     config: AppConfig
   ) => NotificationRuleRepository;
@@ -127,9 +128,12 @@ export async function bootstrap(
     logger,
   });
   await migrationRunner.runMigrations();
+  let repositoryDeps: NotificationRuleRepositoryDeps | undefined;
   const notificationRuleRepository =
     deps.notificationRuleRepositoryFactory?.(config) ??
-    createNotificationRuleRepository(createRepositoryDeps(config));
+    createNotificationRuleRepository(
+      (repositoryDeps = createRepositoryDeps(config, logger))
+    );
 
   const ruleService = (deps.ruleServiceFactory ?? createRuleService)({
     notificationRuleRepository,
@@ -153,16 +157,35 @@ export async function bootstrap(
     logger.info("Discord client 初期化完了");
   });
 
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) {
+      return;
+    }
+    cleanedUp = true;
+    if (!repositoryDeps) {
+      return;
+    }
+    try {
+      repositoryDeps.db.close();
+    } catch (rawError) {
+      const message =
+        rawError instanceof Error ? rawError.message : String(rawError);
+      logger.error(`Database close failed: ${message}`);
+    }
+  };
+
   try {
     await client.login(config.discordToken);
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "不明なエラーが発生しました";
     logger.error(`Discord クライアントのログインに失敗しました: ${message}`);
+    cleanup();
     throw error;
   }
 
-  return { client, config, services, notificationRuleRepository };
+  return { client, config, services, notificationRuleRepository, cleanup };
 }
 
 if (import.meta.main) {
@@ -184,11 +207,13 @@ function resolveDbPath(rawPath: string | undefined): string {
 }
 
 function createRepositoryDeps(
-  config: AppConfig
+  config: AppConfig,
+  logger?: Pick<typeof console, "warn">
 ): NotificationRuleRepositoryDeps {
   const db = new Database(config.dbPath);
   return {
     db,
+    logger,
   };
 }
 

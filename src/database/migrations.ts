@@ -50,6 +50,13 @@ export function createMigrationRunner({
 }
 
 async function readSchema(path: string): Promise<string> {
-  const schema = await readFile(path, "utf8");
-  return schema;
+  try {
+    return await readFile(path, "utf8");
+  } catch (rawError) {
+    const message =
+      rawError instanceof Error ? rawError.message : String(rawError);
+    throw new Error(`Failed to read schema file at ${path}: ${message}`, {
+      cause: rawError,
+    });
+  }
 }

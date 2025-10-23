@@ -20,6 +20,7 @@ describe("NotificationRuleRepository", () => {
 
   const idQueue: string[] = [];
   const nowQueue: Date[] = [];
+  let warnCalls: unknown[][] = [];
 
   const depsFactory = (): NotificationRuleRepositoryDeps => ({
     db,
@@ -37,6 +38,11 @@ describe("NotificationRuleRepository", () => {
       }
       return next;
     },
+    logger: {
+      warn: (...args: any[]) => {
+        warnCalls.push(args);
+      },
+    },
   });
 
   beforeEach(async () => {
@@ -48,6 +54,7 @@ describe("NotificationRuleRepository", () => {
 
     db = new Database(dbPath);
     repository = createNotificationRuleRepository(depsFactory());
+    warnCalls = [];
   });
 
   afterEach(() => {
@@ -55,6 +62,7 @@ describe("NotificationRuleRepository", () => {
     rmSync(tmpDir, { recursive: true, force: true });
     idQueue.length = 0;
     nowQueue.length = 0;
+    warnCalls = [];
   });
 
   function enqueueId(id: string) {
@@ -157,5 +165,62 @@ describe("NotificationRuleRepository", () => {
 
     expect(await repository.findById(created.id)).toBeNull();
     expect(await repository.countByGuild(created.guildId)).toBe(0);
+  });
+
+  it("存在しないIDの更新はエラーを投げる", async () => {
+    enqueueNow("2025-02-01T00:00:00.000Z");
+
+    await expect(
+      repository.updateRule("missing", {
+        name: "Updated",
+        watchedVoiceChannelIds: [],
+        targetUserIds: [],
+        notificationChannelId: "text",
+      })
+    ).rejects.toThrowError(/Notification rule not found/);
+  });
+
+  it("存在しないIDの削除はエラーを投げる", async () => {
+    await expect(repository.deleteRule("missing"))
+      .rejects.toThrowError(/Notification rule not found/);
+  });
+
+  it("重複IDでの作成はエラーになる", async () => {
+    enqueueId("duplicate-id");
+    enqueueNow("2025-03-01T00:00:00.000Z");
+    await repository.createRule(createRuleInput(1));
+
+    enqueueId("duplicate-id");
+    enqueueNow("2025-03-02T00:00:00.000Z");
+
+    await expect(repository.createRule(createRuleInput(2))).rejects.toThrow();
+  });
+
+  it("不正なJSON配列は警告を出し、空配列にフォールバックする", async () => {
+    enqueueId("rule-json");
+    enqueueNow("2025-04-01T00:00:00.000Z");
+    await repository.createRule(createRuleInput(3));
+
+    warnCalls = [];
+    db.exec(`
+      UPDATE notification_rules
+      SET watched_voice_channel_ids = 'not-json',
+          target_user_ids = '"oops"'
+      WHERE id = 'rule-json'
+    `);
+
+    const fetched = await repository.findById("rule-json");
+    expect(fetched).not.toBeNull();
+    if (!fetched) {
+      throw new Error("rule-json not found");
+    }
+
+    expect(fetched.watchedVoiceChannelIds).toEqual([]);
+    expect(fetched.targetUserIds).toEqual([]);
+
+    expect(warnCalls.length).toBe(2);
+    expect(String(warnCalls[0][0])).toMatch(/Failed to parse JSON array/);
+    expect(warnCalls[0][1]).toBeInstanceOf(Error);
+    expect(String(warnCalls[1][0])).toMatch(/JSON parsed but not an array/);
   });
 });

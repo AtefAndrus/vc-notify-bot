@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS notification_rules (
   watched_voice_channel_ids TEXT NOT NULL,
   target_user_ids TEXT NOT NULL,
   notification_channel_id TEXT NOT NULL,
-  enabled INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

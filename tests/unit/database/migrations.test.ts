@@ -43,8 +43,46 @@ describe("createMigrationRunner", () => {
     expect(indexes).toContain("idx_notification_rules_guild_id");
     expect(indexes).toContain("idx_notification_rules_enabled");
 
+    expect(() =>
+      db.exec(`
+        INSERT INTO notification_rules (
+          id,
+          guild_id,
+          name,
+          watched_voice_channel_ids,
+          target_user_ids,
+          notification_channel_id,
+          enabled,
+          created_at,
+          updated_at
+        ) VALUES (
+          'invalid-enabled',
+          'guild',
+          'invalid',
+          '[]',
+          '[]',
+          'channel',
+          2,
+          '2025-01-01T00:00:00.000Z',
+          '2025-01-01T00:00:00.000Z'
+        )
+      `)
+    ).toThrow();
+
     db.close();
 
     await expect(runner.runMigrations()).resolves.toBeUndefined();
+  });
+
+  it("スキーマファイルが存在しない場合にわかりやすいエラーを返す", async () => {
+    const missingSchemaPath = resolve(tmpDir, "missing-schema.sql");
+    const runner = createMigrationRunner({
+      dbPath,
+      schemaPath: missingSchemaPath,
+    });
+
+    await expect(runner.runMigrations()).rejects.toThrow(
+      /Failed to read schema file/
+    );
   });
 });
