@@ -11,12 +11,11 @@ export interface RuleServiceDeps {
 }
 
 export function createRuleService(
-  _deps: RuleServiceDeps
+  deps: RuleServiceDeps
 ): RuleService {
   return {
-    async listRules(_guildId: string) {
-      // TODO(#3): Repository からルールを取得
-      return [];
+    async listRules(guildId: string) {
+      return deps.notificationRuleRepository.findEnabledByGuild(guildId);
     },
   };
 }

@@ -20,6 +20,11 @@ import {
   RuleService,
   RuleServiceDeps,
 } from "@/services/ruleService";
+import {
+  createVoiceStateHandler,
+  type VoiceStateHandler,
+  type VoiceStateHandlerDeps,
+} from "@/handlers/voiceState";
 
 export interface AppConfig {
   discordToken: string;
@@ -29,7 +34,7 @@ export interface AppConfig {
   dataDir: string;
 }
 
-export type MinimalClient = Pick<Client, "once" | "login">;
+export type MinimalClient = Pick<Client, "once" | "login" | "on">;
 
 export interface ApplicationServices {
   ruleService: RuleService;
@@ -59,6 +64,9 @@ export interface BootstrapDependencies {
   ) => NotificationRuleRepository;
   ruleServiceFactory?: (deps: RuleServiceDeps) => RuleService;
   notifyServiceFactory?: (deps: NotifyServiceDeps) => NotifyService;
+  voiceStateHandlerFactory?: (
+    deps: VoiceStateHandlerDeps
+  ) => VoiceStateHandler;
 }
 
 function readEnv(key: string): string | undefined {
@@ -151,6 +159,25 @@ export async function bootstrap(
   const client = (deps.clientFactory ?? defaultClientFactory)(
     config,
     services
+  );
+
+  const voiceStateHandler =
+    (deps.voiceStateHandlerFactory ?? createVoiceStateHandler)({
+      ruleService,
+      notifyService,
+      logger,
+    });
+
+  client.on("voiceStateUpdate", (oldState, newState) =>
+    voiceStateHandler
+      .handle(oldState, newState)
+      .catch((error) => {
+        const detail =
+          error instanceof Error ? error.message : String(error);
+        logger.error(
+          `VoiceStateUpdate: ハンドラー実行中に未処理の例外が発生しました: ${detail}`
+        );
+      })
   );
 
   client.once("ready", () => {

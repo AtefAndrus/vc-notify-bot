@@ -10,6 +10,10 @@ import {
   type ApplicationServices,
   type MinimalClient,
 } from "@/index";
+import type {
+  VoiceStateHandler,
+  VoiceStateHandlerDeps,
+} from "@/handlers/voiceState";
 import type { Client } from "discord.js";
 
 const mutableEnv = Bun.env as Record<string, string | undefined>;
@@ -183,10 +187,55 @@ describe("bootstrap", () => {
     );
     expect(loginMock.mock.calls.length).toBe(1);
   });
+
+  it("voiceStateUpdate イベントを VoiceStateHandler に委譲する", async () => {
+    mutableEnv.DISCORD_TOKEN = "token";
+
+    const { client, onMock } = createClientStub();
+    const handleMock = mock(async () => {});
+    const handler: VoiceStateHandler = {
+      handle: handleMock,
+    };
+
+    const handlerFactory = mock<
+      (deps: VoiceStateHandlerDeps) => VoiceStateHandler
+    >(() => handler);
+
+    const logger = {
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    };
+
+    await bootstrap({
+      clientFactory: () => client,
+      ensureDataDir: () => {},
+      voiceStateHandlerFactory: handlerFactory,
+      logger,
+    });
+
+    expect(handlerFactory).toHaveBeenCalledTimes(1);
+    expect(onMock.mock.calls.length).toBeGreaterThan(0);
+    const call = onMock.mock.calls[0] as
+      | [string, (...args: unknown[]) => unknown]
+      | undefined;
+    expect(call).toBeDefined();
+    if (!call) {
+      throw new Error("voiceStateUpdate listener is not registered");
+    }
+
+    const [event, listener] = call;
+    expect(event).toBe("voiceStateUpdate");
+    const oldState = {} as any;
+    const newState = {} as any;
+    await Promise.resolve(listener(oldState, newState));
+    expect(handleMock).toHaveBeenCalledWith(oldState, newState);
+  });
 });
 
 interface ClientStubOptions {
   login?: (token?: string) => Promise<string>;
+  on?: (event: string, listener: (...args: unknown[]) => void) => void;
 }
 
 function createClientStub(
@@ -198,9 +247,17 @@ function createClientStub(
       (event: string, listener: (...args: unknown[]) => void) => void
     >
   >;
+  onMock: ReturnType<
+    typeof mock<
+      (event: string, listener: (...args: unknown[]) => void) => void
+    >
+  >;
   loginMock: ReturnType<typeof mock<(token?: string) => Promise<string>>>;
 } {
   const onceMock = mock<
+    (event: string, listener: (...args: unknown[]) => void) => void
+  >((_event, _listener) => {});
+  const onMock = mock<
     (event: string, listener: (...args: unknown[]) => void) => void
   >((_event, _listener) => {});
 
@@ -215,11 +272,23 @@ function createClientStub(
     return clientPartial as Client;
   }) as Client["once"];
 
+  const onImpl =
+    options.on ??
+    ((event: string, listener: (...args: unknown[]) => void) => {
+      onMock(event, listener);
+    });
+
+  clientPartial.on = ((event: any, listener: any) => {
+    onImpl(event, listener);
+    return clientPartial as Client;
+  }) as Client["on"];
+
   clientPartial.login = ((token?: string) => loginMock(token)) as Client["login"];
 
   return {
     client: clientPartial as MinimalClient,
     onceMock,
+    onMock,
     loginMock,
   };
 }
