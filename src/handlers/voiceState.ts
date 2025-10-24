@@ -83,6 +83,18 @@ export function createVoiceStateHandler(
   };
 }
 
+/**
+ * 適用可能なルールから一意の通知ペイロードを生成します。
+ *
+ * 同じ通知先チャンネル（notificationChannelId）に対しては、
+ * 最初にマッチしたルールのみが使用され、重複送信を防止します。
+ *
+ * @param rules - 適用可能なルールの配列
+ * @param guildId - ギルドID
+ * @param voiceChannelId - ボイスチャンネルID
+ * @param userId - ユーザーID
+ * @returns 一意の通知ペイロードの配列
+ */
 function createUniqueNotifications(
   rules: NotificationRule[],
   guildId: string,
@@ -117,10 +129,6 @@ function filterApplicableRules(
   userId: string
 ): NotificationRule[] {
   return rules.filter((rule) => {
-    if (!rule.enabled) {
-      return false;
-    }
-
     if (!rule.watchedVoiceChannelIds.includes(voiceChannelId)) {
       return false;
     }

@@ -189,15 +189,13 @@ interface CreateVoiceStateOptions {
 }
 
 function createVoiceState(options: CreateVoiceStateOptions): VoiceState {
-  const guild: Partial<Guild> = {
-    id: options.guildId,
-    name: "Test Guild",
-  };
-
-  const voiceState: Partial<VoiceState> = {
+  return {
     id: options.userId,
     channelId: options.channelId,
-    guild: guild as Guild,
+    guild: {
+      id: options.guildId,
+      name: "Test Guild",
+    } as Guild,
     selfDeaf: false,
     selfMute: false,
     serverDeaf: false,
@@ -207,9 +205,7 @@ function createVoiceState(options: CreateVoiceStateOptions): VoiceState {
     selfVideo: false,
     suppress: false,
     requestToSpeakTimestamp: null,
-  };
-
-  return voiceState as VoiceState;
+  } as VoiceState;
 }
 
 interface CreateRuleOptions {
