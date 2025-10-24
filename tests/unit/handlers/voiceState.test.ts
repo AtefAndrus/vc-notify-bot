@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
-import type { VoiceState } from "discord.js";
+import type { Guild, VoiceState } from "discord.js";
 
 import { createVoiceStateHandler } from "@/handlers/voiceState";
 import type { NotificationRule } from "@/types";
@@ -64,6 +64,8 @@ describe("VoiceStateHandler", () => {
       voiceChannelId,
       userId,
       notificationChannelId: "notify-1",
+      ruleId: applicableRule.id,
+      ruleName: applicableRule.name,
     });
   });
 
@@ -187,13 +189,27 @@ interface CreateVoiceStateOptions {
 }
 
 function createVoiceState(options: CreateVoiceStateOptions): VoiceState {
-  return {
+  const guild: Partial<Guild> = {
+    id: options.guildId,
+    name: "Test Guild",
+  };
+
+  const voiceState: Partial<VoiceState> = {
     id: options.userId,
     channelId: options.channelId,
-    guild: {
-      id: options.guildId,
-    } as any,
-  } as VoiceState;
+    guild: guild as Guild,
+    selfDeaf: false,
+    selfMute: false,
+    serverDeaf: false,
+    serverMute: false,
+    sessionId: "test-session",
+    streaming: false,
+    selfVideo: false,
+    suppress: false,
+    requestToSpeakTimestamp: null,
+  };
+
+  return voiceState as VoiceState;
 }
 
 interface CreateRuleOptions {

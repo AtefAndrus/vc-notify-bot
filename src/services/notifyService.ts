@@ -3,6 +3,8 @@ export interface NotifyPayload {
   voiceChannelId: string;
   userId: string;
   notificationChannelId: string;
+  ruleId: string;
+  ruleName: string;
 }
 
 export interface NotifyService {

@@ -31,21 +31,8 @@ export function createVoiceStateHandler(
         return;
       }
 
-      const guildId = newState.guild?.id;
-      if (!guildId) {
-        logger.warn(
-          "VoiceStateUpdate: guildId を特定できないため処理をスキップしました"
-        );
-        return;
-      }
-
+      const guildId = newState.guild.id;
       const userId = newState.id;
-      if (!userId) {
-        logger.warn(
-          "VoiceStateUpdate: userId を特定できないため処理をスキップしました"
-        );
-        return;
-      }
 
       let rules;
       try {
@@ -116,6 +103,8 @@ function createUniqueNotifications(
       voiceChannelId,
       userId,
       notificationChannelId: rule.notificationChannelId,
+      ruleId: rule.id,
+      ruleName: rule.name,
     });
   }
 
