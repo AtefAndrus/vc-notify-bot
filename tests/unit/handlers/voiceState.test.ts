@@ -24,7 +24,20 @@ describe("VoiceStateHandler", () => {
       sendNotification: mock(async () => {}),
     };
     ruleService = {
+      createRule: mock(async () => {
+        throw new Error("not implemented in test");
+      }),
+      updateRule: mock(async () => {
+        throw new Error("not implemented in test");
+      }),
+      deleteRule: mock(async () => {
+        throw new Error("not implemented in test");
+      }),
+      toggleRule: mock(async () => {
+        throw new Error("not implemented in test");
+      }),
       listRules: mock(async () => [] as NotificationRule[]),
+      getApplicableRules: mock(async () => [] as NotificationRule[]),
     };
     logger = {
       info: mock(() => {}),
@@ -45,7 +58,7 @@ describe("VoiceStateHandler", () => {
       notificationChannelId: "notify-1",
     });
 
-    (ruleService.listRules as any).mockResolvedValue([applicableRule]);
+    (ruleService.getApplicableRules as any).mockResolvedValue([applicableRule]);
 
     const handler = createVoiceStateHandler({
       notifyService,
@@ -58,7 +71,11 @@ describe("VoiceStateHandler", () => {
       createVoiceState({ guildId, userId, channelId: voiceChannelId })
     );
 
-    expect(ruleService.listRules).toHaveBeenCalledWith(guildId);
+    expect(ruleService.getApplicableRules).toHaveBeenCalledWith(
+      guildId,
+      voiceChannelId,
+      userId
+    );
     expect(notifyService.sendNotification).toHaveBeenCalledWith({
       guildId,
       voiceChannelId,
@@ -77,7 +94,7 @@ describe("VoiceStateHandler", () => {
       createVoiceState({ guildId: "guild", userId: "user", channelId: "voice-2" })
     );
 
-    expect(ruleService.listRules).not.toHaveBeenCalled();
+    expect(ruleService.getApplicableRules).not.toHaveBeenCalled();
     expect(notifyService.sendNotification).not.toHaveBeenCalled();
   });
 
@@ -86,14 +103,7 @@ describe("VoiceStateHandler", () => {
     const voiceChannelId = "voice-2";
     const userId = "user-2";
 
-    const nonMatchingRule = createRule({
-      guildId,
-      watchedVoiceChannelIds: [voiceChannelId],
-      targetUserIds: ["other-user"],
-      notificationChannelId: "notify-2",
-    });
-
-    (ruleService.listRules as any).mockResolvedValue([nonMatchingRule]);
+    (ruleService.getApplicableRules as any).mockResolvedValue([]);
 
     const handler = createVoiceStateHandler({ notifyService, ruleService, logger });
 
@@ -123,7 +133,7 @@ describe("VoiceStateHandler", () => {
       notificationChannelId: "notify-3",
     });
 
-    (ruleService.listRules as any).mockResolvedValue([ruleA, ruleB]);
+    (ruleService.getApplicableRules as any).mockResolvedValue([ruleA, ruleB]);
 
     const handler = createVoiceStateHandler({ notifyService, ruleService, logger });
 
@@ -147,7 +157,7 @@ describe("VoiceStateHandler", () => {
       notificationChannelId: "notify-4",
     });
 
-    (ruleService.listRules as any).mockResolvedValue([rule]);
+    (ruleService.getApplicableRules as any).mockResolvedValue([rule]);
     (notifyService.sendNotification as any).mockRejectedValue(
       new Error("send failed")
     );
@@ -167,7 +177,9 @@ describe("VoiceStateHandler", () => {
   it("ルール取得時の例外を補足してログに記録する", async () => {
     const guildId = "guild-5";
 
-    (ruleService.listRules as any).mockRejectedValue(new Error("list error"));
+    (ruleService.getApplicableRules as any).mockRejectedValue(
+      new Error("list error")
+    );
 
     const handler = createVoiceStateHandler({ notifyService, ruleService, logger });
 
