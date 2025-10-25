@@ -147,15 +147,10 @@ export async function bootstrap(
     notificationRuleRepository,
   });
 
-  let discordClientRef: Client | undefined;
+  const clientAccessor = createClientAccessor();
   const notifyService = (deps.notifyServiceFactory ?? createNotifyService)(
     createNotifyServiceDeps(
-      () => {
-        if (!discordClientRef) {
-          throw new Error("Discord client is not initialized");
-        }
-        return discordClientRef;
-      },
+      () => clientAccessor.getClient(),
       logger
     )
   );
@@ -169,7 +164,7 @@ export async function bootstrap(
     config,
     services
   );
-  discordClientRef = client;
+  clientAccessor.setClient(client as Client);
 
   const voiceStateHandler =
     (deps.voiceStateHandlerFactory ?? createVoiceStateHandler)({
@@ -262,12 +257,37 @@ function createRepositoryDeps(
 }
 
 function createNotifyServiceDeps(
-  getClient: () => Pick<Client, "guilds" | "channels">,
+  getClient: () => Promise<Pick<Client, "guilds" | "channels">>,
   logger: Pick<typeof console, "info" | "warn" | "error">
 ): NotifyServiceDeps {
   // TODO(#4): Discord クライアントやテンプレート設定を注入
   return {
     getClient,
     logger,
+  };
+}
+
+function createClientAccessor() {
+  let current: Pick<Client, "guilds" | "channels"> | undefined;
+  const waiters: Array<(client: Pick<Client, "guilds" | "channels">) => void> = [];
+
+  return {
+    getClient: async () => {
+      if (current) {
+        return current;
+      }
+      return new Promise<Pick<Client, "guilds" | "channels">>((resolve) => {
+        waiters.push(resolve);
+      });
+    },
+    setClient: (client: Pick<Client, "guilds" | "channels">) => {
+      current = client;
+      while (waiters.length > 0) {
+        const resolve = waiters.shift();
+        if (resolve) {
+          resolve(client);
+        }
+      }
+    },
   };
 }
