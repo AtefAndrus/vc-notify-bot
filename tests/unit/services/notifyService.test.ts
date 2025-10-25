@@ -284,7 +284,7 @@ describe("NotifyService", () => {
       })
     ).rejects.toThrow("Too many requests");
 
-    expect(sendMock).toHaveBeenCalledTimes(3);
+    expect(sendMock).toHaveBeenCalledTimes(2);
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining("通知送信に失敗しました")
     );
@@ -292,11 +292,11 @@ describe("NotifyService", () => {
     service.cleanup();
   });
 
-  it("ネットワークエラーは最大2回までリトライする", async () => {
+  it("ネットワークエラーは最大1回までリトライする", async () => {
     let attempt = 0;
     sendMock = mock(async () => {
       attempt += 1;
-      if (attempt < 3) {
+      if (attempt < 2) {
         const error: any = new Error("connection reset");
         error.code = "ECONNRESET";
         throw error;
@@ -336,12 +336,9 @@ describe("NotifyService", () => {
       ruleName: "開発チーム通知",
     });
 
-    expect(sendMock).toHaveBeenCalledTimes(3);
+    expect(sendMock).toHaveBeenCalledTimes(2);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("attempt=1")
-    );
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("attempt=2")
     );
 
     service.cleanup();

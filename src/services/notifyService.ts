@@ -376,7 +376,7 @@ async function sendWithRetry(
   delayFn: (ms: number) => Promise<void>,
   onSuccess: () => Promise<void> | void
 ): Promise<void> {
-  const maxRetries = 2;
+  const maxRetries = 1;
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
       await channel.send({ embeds: [embed] });
