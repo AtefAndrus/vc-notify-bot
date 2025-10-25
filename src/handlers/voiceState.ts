@@ -36,7 +36,11 @@ export function createVoiceStateHandler(
 
       let rules;
       try {
-        rules = await deps.ruleService.listRules(guildId);
+        rules = await deps.ruleService.getApplicableRules(
+          guildId,
+          voiceChannelId,
+          userId
+        );
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         logger.error(
@@ -45,14 +49,12 @@ export function createVoiceStateHandler(
         return;
       }
 
-      const candidates = filterApplicableRules(rules, voiceChannelId, userId);
-
-      if (candidates.length === 0) {
+      if (rules.length === 0) {
         return;
       }
 
       const uniqueNotifications = createUniqueNotifications(
-        candidates,
+        rules,
         guildId,
         voiceChannelId,
         userId
@@ -121,22 +123,4 @@ function createUniqueNotifications(
   }
 
   return notifications;
-}
-
-function filterApplicableRules(
-  rules: NotificationRule[],
-  voiceChannelId: string,
-  userId: string
-): NotificationRule[] {
-  return rules.filter((rule) => {
-    if (!rule.watchedVoiceChannelIds.includes(voiceChannelId)) {
-      return false;
-    }
-
-    if (rule.targetUserIds.length === 0) {
-      return true;
-    }
-
-    return rule.targetUserIds.includes(userId);
-  });
 }
