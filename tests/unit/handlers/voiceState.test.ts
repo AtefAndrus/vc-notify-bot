@@ -22,6 +22,7 @@ describe("VoiceStateHandler", () => {
   beforeEach(() => {
     notifyService = {
       sendNotification: mock(async () => {}),
+      cleanup: () => {},
     };
     ruleService = {
       createRule: mock(async () => {

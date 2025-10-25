@@ -147,8 +147,12 @@ export async function bootstrap(
     notificationRuleRepository,
   });
 
+  const clientAccessor = createClientAccessor();
   const notifyService = (deps.notifyServiceFactory ?? createNotifyService)(
-    createNotifyServiceDeps(logger)
+    createNotifyServiceDeps(
+      () => clientAccessor.getClient(),
+      logger
+    )
   );
 
   const services: ApplicationServices = {
@@ -160,6 +164,7 @@ export async function bootstrap(
     config,
     services
   );
+  clientAccessor.setClient(client as Client);
 
   const voiceStateHandler =
     (deps.voiceStateHandlerFactory ?? createVoiceStateHandler)({
@@ -190,6 +195,13 @@ export async function bootstrap(
       return;
     }
     cleanedUp = true;
+    try {
+      notifyService.cleanup();
+    } catch (rawError) {
+      const message =
+        rawError instanceof Error ? rawError.message : String(rawError);
+      logger.error(`NotifyService cleanup failed: ${message}`);
+    }
     if (!repositoryDeps) {
       return;
     }
@@ -245,8 +257,37 @@ function createRepositoryDeps(
 }
 
 function createNotifyServiceDeps(
-  _logger: Pick<typeof console, "info" | "error">
+  getClient: () => Promise<Pick<Client, "guilds" | "channels">>,
+  logger: Pick<typeof console, "info" | "warn" | "error">
 ): NotifyServiceDeps {
   // TODO(#4): Discord クライアントやテンプレート設定を注入
-  return {};
+  return {
+    getClient,
+    logger,
+  };
+}
+
+function createClientAccessor() {
+  let current: Pick<Client, "guilds" | "channels"> | undefined;
+  const waiters: Array<(client: Pick<Client, "guilds" | "channels">) => void> = [];
+
+  return {
+    getClient: async () => {
+      if (current) {
+        return current;
+      }
+      return new Promise<Pick<Client, "guilds" | "channels">>((resolve) => {
+        waiters.push(resolve);
+      });
+    },
+    setClient: (client: Pick<Client, "guilds" | "channels">) => {
+      current = client;
+      while (waiters.length > 0) {
+        const resolve = waiters.shift();
+        if (resolve) {
+          resolve(client);
+        }
+      }
+    },
+  };
 }
