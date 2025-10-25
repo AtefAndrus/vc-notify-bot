@@ -48,6 +48,16 @@ export class RuleNotFoundError extends RuleServiceError {
   }
 }
 
+export class RuleRepositoryConflictError extends RuleServiceError {
+  constructor(public readonly ruleId: string) {
+    super(
+      "Rule repository returned inconsistent state",
+      "RULE_REPOSITORY_CONFLICT"
+    );
+    this.name = "RuleRepositoryConflictError";
+  }
+}
+
 export interface RuleService {
   createRule: (input: CreateRuleInput) => Promise<NotificationRule>;
   updateRule: (id: string, input: UpdateRuleInput) => Promise<NotificationRule>;
@@ -75,8 +85,8 @@ export function createRuleService(deps: RuleServiceDeps): RuleService {
 
   return {
     async createRule(input) {
-      const violations = validateRuleInput(input);
-      if (violations.length > 0) {
+      const { violations, normalized } = validateCreateRuleInput(input);
+      if (violations.length > 0 || !normalized) {
         log(logger, "warn", "RuleService.createRule: validation failed", {
           guildId: input.guildId,
           violations,
@@ -94,11 +104,11 @@ export function createRuleService(deps: RuleServiceDeps): RuleService {
       }
 
       const created = await repository.createRule({
-        guildId: input.guildId,
-        name: input.name.trim(),
-        watchedVoiceChannelIds: [...input.watchedVoiceChannelIds],
-        targetUserIds: [...input.targetUserIds],
-        notificationChannelId: input.notificationChannelId,
+        guildId: normalized.guildId,
+        name: normalized.name,
+        watchedVoiceChannelIds: normalized.watchedVoiceChannelIds,
+        targetUserIds: normalized.targetUserIds,
+        notificationChannelId: normalized.notificationChannelId,
         enabled: true,
       });
 
@@ -119,8 +129,8 @@ export function createRuleService(deps: RuleServiceDeps): RuleService {
         throw new RuleNotFoundError(id);
       }
 
-      const violations = validateRuleInput(input);
-      if (violations.length > 0) {
+      const { violations, normalized } = validateUpdateRuleInput(input);
+      if (violations.length > 0 || !normalized) {
         log(logger, "warn", "RuleService.updateRule: validation failed", {
           ruleId: id,
           violations,
@@ -129,10 +139,10 @@ export function createRuleService(deps: RuleServiceDeps): RuleService {
       }
 
       const updated = await repository.updateRule(id, {
-        name: input.name.trim(),
-        watchedVoiceChannelIds: [...input.watchedVoiceChannelIds],
-        targetUserIds: [...input.targetUserIds],
-        notificationChannelId: input.notificationChannelId,
+        name: normalized.name,
+        watchedVoiceChannelIds: normalized.watchedVoiceChannelIds,
+        targetUserIds: normalized.targetUserIds,
+        notificationChannelId: normalized.notificationChannelId,
       });
 
       log(logger, "info", "RuleService.updateRule: rule updated", {
@@ -171,10 +181,16 @@ export function createRuleService(deps: RuleServiceDeps): RuleService {
       const toggled = await repository.toggleEnabled(id, nextState);
 
       if (!toggled) {
-        log(logger, "warn", "RuleService.toggleRule: repository returned null", {
-          ruleId: id,
-        });
-        throw new RuleNotFoundError(id);
+        log(
+          logger,
+          "error",
+          "RuleService.toggleRule: repository inconsistency detected",
+          {
+            ruleId: id,
+            expectedEnabled: nextState,
+          }
+        );
+        throw new RuleRepositoryConflictError(id);
       }
 
       log(logger, "info", "RuleService.toggleRule: rule toggled", {
@@ -218,51 +234,132 @@ const WATCHED_CHANNEL_MAX = 10;
 const TARGET_USER_MAX = 50;
 const SNOWFLAKE_REGEX = /^\d{17,19}$/;
 
-function validateRuleInput(
-  input: CreateRuleInput | UpdateRuleInput
-): string[] {
+interface NormalizedRuleFields {
+  name: string;
+  watchedVoiceChannelIds: string[];
+  targetUserIds: string[];
+  notificationChannelId: string;
+}
+
+interface NormalizedCreateRuleInput extends NormalizedRuleFields {
+  guildId: string;
+}
+
+interface ValidationOutcome<T> {
+  violations: string[];
+  normalized?: T;
+}
+
+function validateCreateRuleInput(
+  input: CreateRuleInput
+): ValidationOutcome<NormalizedCreateRuleInput> {
+  const violations: string[] = [];
+  const common = validateCommonRuleFields(input);
+  violations.push(...common.violations);
+
+  const guildId = typeof input.guildId === "string" ? input.guildId.trim() : "";
+  if (!SNOWFLAKE_REGEX.test(guildId)) {
+    violations.push("guildId must be a valid snowflake ID.");
+  }
+
+  if (violations.length > 0 || !common.normalized) {
+    return { violations };
+  }
+
+  return {
+    violations,
+    normalized: {
+      guildId,
+      ...common.normalized,
+    },
+  };
+}
+
+function validateUpdateRuleInput(
+  input: UpdateRuleInput
+): ValidationOutcome<NormalizedRuleFields> {
+  const common = validateCommonRuleFields(input);
+  return {
+    violations: [...common.violations],
+    normalized: common.normalized,
+  };
+}
+
+function validateCommonRuleFields(
+  input: Pick<
+    CreateRuleInput,
+    "name" | "watchedVoiceChannelIds" | "targetUserIds" | "notificationChannelId"
+  >
+): ValidationOutcome<NormalizedRuleFields> {
   const violations: string[] = [];
 
-  const name = input.name?.trim();
+  const name = typeof input.name === "string" ? input.name.trim() : "";
   if (!name || name.length < NAME_MIN_LENGTH || name.length > NAME_MAX_LENGTH) {
     violations.push("name must be between 1 and 50 characters.");
   }
 
-  if (
-    !Array.isArray(input.watchedVoiceChannelIds) ||
-    input.watchedVoiceChannelIds.length < WATCHED_CHANNEL_MIN ||
-    input.watchedVoiceChannelIds.length > WATCHED_CHANNEL_MAX
-  ) {
-    violations.push(
-      "watchedVoiceChannelIds must contain between 1 and 10 items."
-    );
-  } else if (
-    input.watchedVoiceChannelIds.some(
-      (channelId) => !SNOWFLAKE_REGEX.test(String(channelId))
-    )
-  ) {
-    violations.push("watchedVoiceChannelIds must contain valid snowflake IDs.");
-  }
-
-  if (!Array.isArray(input.targetUserIds)) {
-    violations.push("targetUserIds must be an array.");
+  const watchedVoiceChannelIds = Array.isArray(input.watchedVoiceChannelIds)
+    ? input.watchedVoiceChannelIds.map((channelId) => String(channelId).trim())
+    : [];
+  if (!Array.isArray(input.watchedVoiceChannelIds)) {
+    violations.push("watchedVoiceChannelIds must be an array.");
   } else {
-    if (input.targetUserIds.length > TARGET_USER_MAX) {
-      violations.push("targetUserIds must not exceed 50 items.");
+    if (
+      watchedVoiceChannelIds.length < WATCHED_CHANNEL_MIN ||
+      watchedVoiceChannelIds.length > WATCHED_CHANNEL_MAX
+    ) {
+      violations.push(
+        "watchedVoiceChannelIds must contain between 1 and 10 items."
+      );
     }
 
     if (
-      input.targetUserIds.some((userId) => !SNOWFLAKE_REGEX.test(String(userId)))
+      watchedVoiceChannelIds.some(
+        (channelId) => !SNOWFLAKE_REGEX.test(channelId)
+      )
     ) {
+      violations.push(
+        "watchedVoiceChannelIds must contain valid snowflake IDs."
+      );
+    }
+  }
+
+  const targetUserIds = Array.isArray(input.targetUserIds)
+    ? input.targetUserIds.map((userId) => String(userId).trim())
+    : [];
+  if (!Array.isArray(input.targetUserIds)) {
+    violations.push("targetUserIds must be an array.");
+  } else {
+    if (targetUserIds.length > TARGET_USER_MAX) {
+      violations.push("targetUserIds must not exceed 50 items.");
+    }
+
+    if (targetUserIds.some((userId) => !SNOWFLAKE_REGEX.test(userId))) {
       violations.push("targetUserIds must contain valid snowflake IDs.");
     }
   }
 
-  if (!SNOWFLAKE_REGEX.test(String(input.notificationChannelId))) {
+  const notificationChannelId =
+    typeof input.notificationChannelId === "string"
+      ? input.notificationChannelId.trim()
+      : "";
+  if (!SNOWFLAKE_REGEX.test(notificationChannelId)) {
     violations.push("notificationChannelId must be a valid snowflake ID.");
   }
 
-  return violations;
+  if (violations.length > 0) {
+    return { violations };
+  }
+
+  return {
+    violations,
+    normalized: {
+      name,
+      watchedVoiceChannelIds,
+      targetUserIds,
+      notificationChannelId,
+    },
+  };
 }
 
 function log(

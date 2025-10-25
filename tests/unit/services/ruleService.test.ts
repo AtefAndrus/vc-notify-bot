@@ -5,6 +5,7 @@ import {
   RuleLimitExceededError,
   RuleNotFoundError,
   RuleValidationError,
+  RuleRepositoryConflictError,
 } from "@/services/ruleService";
 import type {
   CreateNotificationRuleInput,
@@ -13,9 +14,13 @@ import type {
 } from "@/repositories/notificationRuleRepository";
 import type { NotificationRule } from "@/types";
 
+const BASE_GUILD_ID = "100000000000000001";
+const ALT_GUILD_ID = "300000000000000000";
+const LIMIT_GUILD_ID = "400000000000000000";
+
 const baseRule: NotificationRule = {
   id: "rule-1",
-  guildId: "guild-1",
+  guildId: BASE_GUILD_ID,
   name: "Rule 1",
   watchedVoiceChannelIds: ["100000000000000000"],
   targetUserIds: [],
@@ -109,16 +114,16 @@ describe("RuleService", () => {
       const service = createRuleService({ notificationRuleRepository: repository });
 
       const rule = await service.createRule({
-        guildId: "guild-2",
+        guildId: ALT_GUILD_ID,
         name: "Project Alpha",
         watchedVoiceChannelIds: ["400000000000000000"],
         targetUserIds: ["500000000000000000", "500000000000000001"],
         notificationChannelId: "600000000000000000",
       });
 
-      expect(countByGuildMock).toHaveBeenCalledWith("guild-2");
+      expect(countByGuildMock).toHaveBeenCalledWith(ALT_GUILD_ID);
       expect(createRuleMock.mock.calls[0][0]).toEqual({
-        guildId: "guild-2",
+        guildId: ALT_GUILD_ID,
         name: "Project Alpha",
         watchedVoiceChannelIds: ["400000000000000000"],
         targetUserIds: ["500000000000000000", "500000000000000001"],
@@ -134,7 +139,7 @@ describe("RuleService", () => {
 
       await expect(
         service.createRule({
-          guildId: "guild-3",
+          guildId: LIMIT_GUILD_ID,
           name: "Overflow",
           watchedVoiceChannelIds: ["100000000000000000"],
           targetUserIds: [],
@@ -148,7 +153,7 @@ describe("RuleService", () => {
 
       await service
         .createRule({
-          guildId: "guild-4",
+          guildId: "invalid",
           name: "",
           watchedVoiceChannelIds: [],
           targetUserIds: [],
@@ -164,10 +169,35 @@ describe("RuleService", () => {
               expect.arrayContaining([
                 "name must be between 1 and 50 characters.",
                 "watchedVoiceChannelIds must contain between 1 and 10 items.",
+                "guildId must be a valid snowflake ID.",
               ])
             );
           }
         );
+    });
+
+    it("入力値を正規化してRepositoryに渡す", async () => {
+      const service = createRuleService({ notificationRuleRepository: repository });
+
+      await service.createRule({
+        guildId: "300000000000000000 ",
+        name: "  Project Beta ",
+        watchedVoiceChannelIds: [" 700000000000000000 ", "700000000000000001"],
+        targetUserIds: [" 800000000000000000 "],
+        notificationChannelId: " 900000000000000000 ",
+      });
+
+      expect(createRuleMock.mock.calls[0][0]).toEqual({
+        guildId: "300000000000000000",
+        name: "Project Beta",
+        watchedVoiceChannelIds: [
+          "700000000000000000",
+          "700000000000000001",
+        ],
+        targetUserIds: ["800000000000000000"],
+        notificationChannelId: "900000000000000000",
+        enabled: true,
+      });
     });
   });
 
@@ -273,24 +303,32 @@ describe("RuleService", () => {
       await expect(service.toggleRule("missing"))
         .rejects.toBeInstanceOf(RuleNotFoundError);
     });
+
+    it("Repositoryがnullを返した場合はRuleRepositoryConflictErrorを投げる", async () => {
+      toggleEnabledMock.mockResolvedValueOnce(null);
+      const service = createRuleService({ notificationRuleRepository: repository });
+
+      await expect(service.toggleRule("rule-7", false))
+        .rejects.toBeInstanceOf(RuleRepositoryConflictError);
+    });
   });
 
   describe("listRules", () => {
     it("デフォルトでは有効ルールのみ取得", async () => {
       const service = createRuleService({ notificationRuleRepository: repository });
 
-      await service.listRules("guild-1");
+      await service.listRules(BASE_GUILD_ID);
 
-      expect(findEnabledByGuildMock).toHaveBeenCalledWith("guild-1");
+      expect(findEnabledByGuildMock).toHaveBeenCalledWith(BASE_GUILD_ID);
       expect(findByGuildMock).not.toHaveBeenCalled();
     });
 
     it("includeDisabledがtrueの場合は全件取得", async () => {
       const service = createRuleService({ notificationRuleRepository: repository });
 
-      await service.listRules("guild-1", { includeDisabled: true });
+      await service.listRules(BASE_GUILD_ID, { includeDisabled: true });
 
-      expect(findByGuildMock).toHaveBeenCalledWith("guild-1");
+      expect(findByGuildMock).toHaveBeenCalledWith(BASE_GUILD_ID);
     });
   });
 
@@ -305,12 +343,12 @@ describe("RuleService", () => {
       const service = createRuleService({ notificationRuleRepository: repository });
 
       const rules = await service.getApplicableRules(
-        "guild-1",
+        BASE_GUILD_ID,
         "400000000000000000",
         "500000000000000000"
       );
 
-      expect(findEnabledByGuildMock).toHaveBeenCalledWith("guild-1");
+      expect(findEnabledByGuildMock).toHaveBeenCalledWith(BASE_GUILD_ID);
       expect(rules.map((rule) => rule.id)).toEqual(["rule-A", "rule-B"]);
     });
   });
