@@ -34,7 +34,7 @@ export interface AppConfig {
   dataDir: string;
 }
 
-export type MinimalClient = Pick<Client, "once" | "login" | "on">;
+export type MinimalClient = Client;
 
 export interface ApplicationServices {
   ruleService: RuleService;
@@ -147,8 +147,17 @@ export async function bootstrap(
     notificationRuleRepository,
   });
 
+  let discordClientRef: Client | undefined;
   const notifyService = (deps.notifyServiceFactory ?? createNotifyService)(
-    createNotifyServiceDeps(logger)
+    createNotifyServiceDeps(
+      () => {
+        if (!discordClientRef) {
+          throw new Error("Discord client is not initialized");
+        }
+        return discordClientRef;
+      },
+      logger
+    )
   );
 
   const services: ApplicationServices = {
@@ -160,6 +169,7 @@ export async function bootstrap(
     config,
     services
   );
+  discordClientRef = client;
 
   const voiceStateHandler =
     (deps.voiceStateHandlerFactory ?? createVoiceStateHandler)({
@@ -245,8 +255,12 @@ function createRepositoryDeps(
 }
 
 function createNotifyServiceDeps(
-  _logger: Pick<typeof console, "info" | "error">
+  getClient: () => Pick<Client, "guilds" | "channels">,
+  logger: Pick<typeof console, "info" | "warn" | "error">
 ): NotifyServiceDeps {
   // TODO(#4): Discord クライアントやテンプレート設定を注入
-  return {};
+  return {
+    getClient,
+    logger,
+  };
 }
