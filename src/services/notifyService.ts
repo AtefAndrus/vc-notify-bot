@@ -6,6 +6,9 @@ import {
   GuildMember,
   TextBasedChannel,
   VoiceBasedChannel,
+  type Message,
+  type MessageCreateOptions,
+  type MessagePayload,
   type User,
 } from "discord.js";
 
@@ -20,6 +23,7 @@ export interface NotifyPayload {
 
 export interface NotifyService {
   sendNotification: (payload: NotifyPayload) => Promise<void>;
+  cleanup: () => void;
 }
 
 export interface NotifyServiceDeps {
@@ -35,7 +39,14 @@ const DUPLICATE_WINDOW_DEFAULT_MS = 5_000;
 const RATE_LIMIT_FALLBACK_DELAY_MS = 1_000;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
-type SendableTextChannel = Extract<TextBasedChannel, { send: (...args: any[]) => unknown }>;
+type SendableTextChannel = Extract<
+  TextBasedChannel,
+  {
+    send: (
+      options: string | MessagePayload | MessageCreateOptions
+    ) => Promise<Message>;
+  }
+>;
 
 export function createNotifyService(deps: NotifyServiceDeps): NotifyService {
   const logger = deps.logger ?? console;
@@ -73,11 +84,13 @@ export function createNotifyService(deps: NotifyServiceDeps): NotifyService {
       const guild = await fetchGuild(client, payload.guildId, logger);
       const voiceChannel = await fetchVoiceChannel(guild, payload.voiceChannelId, logger);
       if (!voiceChannel) {
+        trackNotification(notificationKey);
         return;
       }
 
       const member = await fetchMember(guild, payload.userId, logger);
       if (!member) {
+        trackNotification(notificationKey);
         return;
       }
 
@@ -87,6 +100,7 @@ export function createNotifyService(deps: NotifyServiceDeps): NotifyService {
         logger
       );
       if (!notifyChannel) {
+        trackNotification(notificationKey);
         return;
       }
 
@@ -100,9 +114,15 @@ export function createNotifyService(deps: NotifyServiceDeps): NotifyService {
         logger,
         delay,
         async () => {
-          markAsSent(notificationKey);
+          trackNotification(notificationKey);
         }
       );
+    },
+    cleanup() {
+      for (const handle of recentNotifications.values()) {
+        cancelTimeout(handle);
+      }
+      recentNotifications.clear();
     },
   };
 
@@ -110,7 +130,7 @@ export function createNotifyService(deps: NotifyServiceDeps): NotifyService {
     return duplicateTtlMs > 0 && recentNotifications.has(key);
   }
 
-  function markAsSent(key: string): void {
+  function trackNotification(key: string): void {
     if (duplicateTtlMs <= 0) {
       return;
     }
@@ -118,6 +138,7 @@ export function createNotifyService(deps: NotifyServiceDeps): NotifyService {
     const existing = recentNotifications.get(key);
     if (existing) {
       cancelTimeout(existing);
+      recentNotifications.delete(key);
     }
 
     const handle = scheduleTimeout(() => {
@@ -282,14 +303,14 @@ async function sendWithRetry(
   payload: NotifyPayload,
   logger: Pick<typeof console, "info" | "warn" | "error">,
   delayFn: (ms: number) => Promise<void>,
-  onSuccess: () => void
+  onSuccess: () => Promise<void> | void
 ): Promise<void> {
   try {
     await channel.send({ embeds: [embed] });
-    onSuccess();
     logger.info(
       `NotifyService: 通知を送信しました (ruleId=${payload.ruleId}, channelId=${payload.notificationChannelId})`
     );
+    await onSuccess();
     return;
   } catch (error) {
     if (isRateLimitError(error)) {
@@ -300,10 +321,10 @@ async function sendWithRetry(
       await delayFn(retryDelay);
       try {
         await channel.send({ embeds: [embed] });
-        onSuccess();
         logger.info(
           `NotifyService: 通知をリトライ送信しました (ruleId=${payload.ruleId}, channelId=${payload.notificationChannelId})`
         );
+        await onSuccess();
         return;
       } catch (retryError) {
         logger.error(

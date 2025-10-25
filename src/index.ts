@@ -34,7 +34,7 @@ export interface AppConfig {
   dataDir: string;
 }
 
-export type MinimalClient = Client;
+export type MinimalClient = Pick<Client, "once" | "login" | "on">;
 
 export interface ApplicationServices {
   ruleService: RuleService;
@@ -200,6 +200,13 @@ export async function bootstrap(
       return;
     }
     cleanedUp = true;
+    try {
+      notifyService.cleanup();
+    } catch (rawError) {
+      const message =
+        rawError instanceof Error ? rawError.message : String(rawError);
+      logger.error(`NotifyService cleanup failed: ${message}`);
+    }
     if (!repositoryDeps) {
       return;
     }
