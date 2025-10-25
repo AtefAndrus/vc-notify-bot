@@ -94,13 +94,13 @@ export function createRuleService(deps: RuleServiceDeps): RuleService {
         throw new RuleValidationError(violations);
       }
 
-      const ruleCount = await repository.countByGuild(input.guildId);
+      const ruleCount = await repository.countByGuild(normalized.guildId);
       if (ruleCount >= RULES_PER_GUILD_LIMIT) {
         log(logger, "warn", "RuleService.createRule: limit exceeded", {
-          guildId: input.guildId,
+          guildId: normalized.guildId,
           limit: RULES_PER_GUILD_LIMIT,
         });
-        throw new RuleLimitExceededError(input.guildId, RULES_PER_GUILD_LIMIT);
+        throw new RuleLimitExceededError(normalized.guildId, RULES_PER_GUILD_LIMIT);
       }
 
       const created = await repository.createRule({
@@ -298,12 +298,15 @@ function validateCommonRuleFields(
     violations.push("name must be between 1 and 50 characters.");
   }
 
-  const watchedVoiceChannelIds = Array.isArray(input.watchedVoiceChannelIds)
-    ? input.watchedVoiceChannelIds.map((channelId) => String(channelId).trim())
-    : [];
+  let watchedVoiceChannelIds: string[] = [];
+
   if (!Array.isArray(input.watchedVoiceChannelIds)) {
     violations.push("watchedVoiceChannelIds must be an array.");
   } else {
+    watchedVoiceChannelIds = input.watchedVoiceChannelIds.map(
+      (channelId) => String(channelId).trim()
+    );
+
     if (
       watchedVoiceChannelIds.length < WATCHED_CHANNEL_MIN ||
       watchedVoiceChannelIds.length > WATCHED_CHANNEL_MAX
@@ -324,12 +327,13 @@ function validateCommonRuleFields(
     }
   }
 
-  const targetUserIds = Array.isArray(input.targetUserIds)
-    ? input.targetUserIds.map((userId) => String(userId).trim())
-    : [];
+  let targetUserIds: string[] = [];
+
   if (!Array.isArray(input.targetUserIds)) {
     violations.push("targetUserIds must be an array.");
   } else {
+    targetUserIds = input.targetUserIds.map((userId) => String(userId).trim());
+
     if (targetUserIds.length > TARGET_USER_MAX) {
       violations.push("targetUserIds must not exceed 50 items.");
     }
