@@ -293,7 +293,7 @@ describe("bootstrap", () => {
   it("ready イベントで Slash Commands を登録する", async () => {
     mutableEnv.DISCORD_TOKEN = "token";
 
-    const { client, onceMock } = createClientStub();
+    const { client, onceMock, destroyMock } = createClientStub();
     const registerCommandsMock = mock(async () => {});
     const logger = {
       info: () => {},
@@ -316,21 +316,85 @@ describe("bootstrap", () => {
       throw new Error("ready listener is not registered");
     }
 
-    const readyListener = readyListenerCall[1] as () => void;
-    readyListener();
-    await Promise.resolve();
-    await Promise.resolve();
+    const readyListener = readyListenerCall[1] as () => Promise<void>;
+    await readyListener();
 
     expect(registerCommandsMock).toHaveBeenCalledWith(
       client,
       commandDefinitions
     );
+    expect(destroyMock).not.toHaveBeenCalled();
+  });
+
+  it("Slash Commands 登録に失敗した場合に Bot を停止する", async () => {
+    mutableEnv.DISCORD_TOKEN = "token";
+
+    const { client, onceMock, destroyMock } = createClientStub();
+    const registerCommandsMock = mock(async () => {
+      throw new Error("API rate limit exceeded");
+    });
+    const errorMock = mock((message?: unknown) => {});
+    const logger = {
+      info: () => {},
+      warn: () => {},
+      error: errorMock,
+    };
+
+    const originalExit = process.exit;
+    const exitCalls: number[] = [];
+    const exitMock = mock((code?: number) => {
+      exitCalls.push(code ?? 0);
+      throw new Error("process.exit invoked");
+    });
+    process.exit = ((code?: number) => exitMock(code)) as typeof process.exit;
+
+    try {
+      await bootstrap({
+        clientFactory: () => client,
+        ensureDataDir: () => {},
+        logger,
+        registerCommands: registerCommandsMock,
+      });
+
+      const readyListenerCall = onceMock.mock.calls.find(
+        ([event]) => event === "ready"
+      );
+      expect(readyListenerCall).toBeDefined();
+      if (!readyListenerCall) {
+        throw new Error("ready listener is not registered");
+      }
+
+      const readyListener = readyListenerCall[1] as () => Promise<void>;
+      await expect(readyListener()).rejects.toThrow("process.exit invoked");
+    } finally {
+      process.exit = originalExit;
+    }
+
+    expect(registerCommandsMock).toHaveBeenCalledWith(
+      client,
+      commandDefinitions
+    );
+    expect(destroyMock).toHaveBeenCalledTimes(1);
+    expect(exitCalls).toEqual([1]);
+    const errorMessages: string[] = [];
+    for (const callArgs of errorMock.mock.calls) {
+      errorMessages.push(String(callArgs[0] ?? ""));
+    }
+    expect(
+      errorMessages.some((msg) =>
+        msg.includes("Slash Commands の登録に失敗しました")
+      )
+    ).toBeTrue();
+    expect(
+      errorMessages.some((msg) => msg.includes("Bot を停止します。"))
+    ).toBeTrue();
   });
 });
 
 interface ClientStubOptions {
   login?: (token?: string) => Promise<string>;
   on?: (event: string, listener: (...args: unknown[]) => void) => void;
+  destroy?: () => Promise<void>;
 }
 
 function createClientStub(
@@ -347,6 +411,7 @@ function createClientStub(
       (event: string, listener: (...args: unknown[]) => void) => void
     >
   >;
+  destroyMock: ReturnType<typeof mock<() => Promise<void>>>;
   loginMock: ReturnType<typeof mock<(token?: string) => Promise<string>>>;
 } {
   const onceMock = mock<
@@ -359,6 +424,8 @@ function createClientStub(
   const loginImpl =
     options.login ?? ((token?: string) => Promise.resolve(token ?? ""));
   const loginMock = mock<(token?: string) => Promise<string>>(loginImpl);
+  const destroyImpl = options.destroy ?? (async () => {});
+  const destroyMock = mock<() => Promise<void>>(destroyImpl);
 
   const clientPartial: Partial<MinimalClient> = {};
 
@@ -383,12 +450,14 @@ function createClientStub(
     return clientPartial as Client;
   }) as Client["on"];
 
+  clientPartial.destroy = (async () => destroyMock()) as Client["destroy"];
   clientPartial.login = ((token?: string) => loginMock(token)) as Client["login"];
 
   return {
     client: clientPartial as MinimalClient,
     onceMock,
     onMock,
+    destroyMock,
     loginMock,
   };
 }

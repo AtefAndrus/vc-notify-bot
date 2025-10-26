@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock } from "bun:test";
 import {
   Collection,
   EmbedBuilder,
@@ -58,6 +58,10 @@ describe("handleSetupCommand", () => {
       (field) => field.name === "不足しているBot権限"
     );
     expect(missing?.value).toContain("SEND_MESSAGES");
+    const guidance = embed.fields?.find(
+      (field) => field.name === "権限の付与方法"
+    );
+    expect(guidance?.value).toContain("サーバー設定");
   });
 
   it("データベース未初期化を警告する", async () => {
@@ -102,11 +106,35 @@ describe("handleSetupCommand", () => {
     expect(nextField?.value).toContain("/vc-notify rule add");
     expect(embed.timestamp).toBe(fixedNow.toISOString());
   });
+
+  it("Bot メンバー情報が取得できない場合にエラーメッセージを返す", async () => {
+    const { interaction, replyMock } = createInteractionStub({
+      memberPermissions: new PermissionsBitField(PermissionFlagsBits.ManageGuild),
+      botPermissions: permissionsFrom(DEFAULT_REQUIRED_BOT_PERMISSIONS),
+      botMember: null,
+      fetchReturnsNull: true,
+    });
+
+    await handleSetupCommand(
+      interaction,
+      createDeps({
+        checkDatabaseReady: async () => true,
+      })
+    );
+
+    expect(replyMock.mock.calls.length).toBe(1);
+    const [argument] = replyMock.mock.calls[0] ?? [];
+    const options = argument as { content?: string };
+    expect(options.content).toContain("Bot のメンバー情報を取得できませんでした");
+  });
 });
 
 interface InteractionStubOptions {
   memberPermissions: PermissionsBitField;
   botPermissions: PermissionsBitField;
+  botMember?: { permissions: PermissionsBitField } | null;
+  fetchReturnsNull?: boolean;
+  fetchReject?: Error;
 }
 
 function createInteractionStub(options: InteractionStubOptions): {
@@ -117,15 +145,28 @@ function createInteractionStub(options: InteractionStubOptions): {
 
   const guildChannels = new Collection<string, any>();
 
+  const botMember =
+    options.botMember === undefined
+      ? { permissions: options.botPermissions }
+      : options.botMember;
+
+  const fetchMock = mock(async () => {
+    if (options.fetchReject) {
+      throw options.fetchReject;
+    }
+    if (options.fetchReturnsNull) {
+      return null;
+    }
+    return {
+      permissions: options.botPermissions,
+    };
+  });
+
   const guild = {
     id: "guild-id",
     members: {
-      me: {
-        permissions: options.botPermissions,
-      },
-      fetch: mock(async () => ({
-        permissions: options.botPermissions,
-      })),
+      me: botMember,
+      fetch: fetchMock,
     },
     channels: {
       cache: guildChannels,

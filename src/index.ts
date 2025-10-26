@@ -47,7 +47,7 @@ export interface AppConfig {
 
 export type MinimalClient = Pick<
   Client,
-  "once" | "login" | "on" | "guilds" | "channels"
+  "once" | "login" | "on" | "guilds" | "channels" | "destroy"
 > & {
   application?: Client["application"];
   user?: Client["user"];
@@ -208,10 +208,12 @@ export async function bootstrap(
       logger,
       notificationRuleRepository,
       services,
+      db: repositoryDeps?.db,
     }) ??
     createDefaultSetupCommandDeps({
       logger,
       notificationRuleRepository,
+      db: repositoryDeps?.db,
     });
 
   const setupCommandHandler = deps.setupCommandHandler ?? handleSetupCommand;
@@ -256,7 +258,17 @@ export async function bootstrap(
               content: "セットアップコマンドの処理中にエラーが発生しました。",
               ephemeral: true,
             })
-            .catch(() => {});
+            .catch((replyError) => {
+              if (!shouldIgnoreInteractionReplyError(replyError)) {
+                const replyDetail =
+                  replyError instanceof Error
+                    ? replyError.message
+                    : String(replyError);
+                logger.error(
+                  `SetupCommand: エラー応答の送信に失敗しました: ${replyDetail}`
+                );
+              }
+            });
         }
       }
       return;
@@ -268,20 +280,42 @@ export async function bootstrap(
           content: "このサブコマンドは現在未対応です。",
           ephemeral: true,
         })
-        .catch(() => {});
+        .catch((replyError) => {
+          if (!shouldIgnoreInteractionReplyError(replyError)) {
+            const replyDetail =
+              replyError instanceof Error
+                ? replyError.message
+                : String(replyError);
+            logger.error(
+              `SetupCommand: 未対応サブコマンドへの応答に失敗しました: ${replyDetail}`
+            );
+          }
+        });
     }
   });
 
-  client.once("ready", () => {
+  client.once("ready", async () => {
     logger.info("Discord client 初期化完了");
-    Promise.resolve(registerCommands(client as DiscordClient, commandDefinitions))
-      .then(() => {
-        logger.info("Slash Commands の登録が完了しました。");
-      })
-      .catch((error) => {
-        const detail = error instanceof Error ? error.message : String(error);
-        logger.error(`Slash Commands の登録に失敗しました: ${detail}`);
-      });
+    try {
+      await registerCommands(client as DiscordClient, commandDefinitions);
+      logger.info("Slash Commands の登録が完了しました。");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      logger.error(`Slash Commands の登録に失敗しました: ${detail}`);
+      logger.error("Bot を停止します。");
+      try {
+        await client.destroy();
+      } catch (destroyError) {
+        const destroyDetail =
+          destroyError instanceof Error
+            ? destroyError.message
+            : String(destroyError);
+        logger.error(
+          `Discord クライアントの破棄に失敗しました: ${destroyDetail}`
+        );
+      }
+      process.exit(1);
+    }
   });
 
   let cleanedUp = false;
@@ -393,15 +427,17 @@ export interface SetupCommandDepsFactoryContext {
   logger: Pick<typeof console, "info" | "warn" | "error">;
   notificationRuleRepository: NotificationRuleRepository;
   services: ApplicationServices;
+  db?: Database;
 }
 
 function createDefaultSetupCommandDeps({
   logger,
   notificationRuleRepository,
+  db,
 }: Pick<
   SetupCommandDepsFactoryContext,
   "logger" | "notificationRuleRepository"
->): SetupCommandDeps {
+> & { db?: Database }): SetupCommandDeps {
   return {
     requiredBotPermissions: DEFAULT_REQUIRED_BOT_PERMISSIONS,
     logger,
@@ -409,6 +445,36 @@ function createDefaultSetupCommandDeps({
     checkDatabaseReady: async () => {
       try {
         await notificationRuleRepository.countByGuild("__health_check__");
+        if (db) {
+          let transactionOpened = false;
+          try {
+            db.exec("BEGIN IMMEDIATE");
+            transactionOpened = true;
+          } catch (beginError) {
+            const detail =
+              beginError instanceof Error
+                ? beginError.message
+                : String(beginError);
+            throw new Error(
+              `データベースが書き込み不可の可能性があります: ${detail}`,
+              { cause: beginError }
+            );
+          } finally {
+            if (transactionOpened) {
+              try {
+                db.exec("ROLLBACK");
+              } catch (rollbackError) {
+                const rollbackDetail =
+                  rollbackError instanceof Error
+                    ? rollbackError.message
+                    : String(rollbackError);
+                logger.warn?.(
+                  `SetupCommand: ヘルスチェックのロールバックに失敗しました: ${rollbackDetail}`
+                );
+              }
+            }
+          }
+        }
         return true;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -428,8 +494,9 @@ function createDefaultCommandRegistrar(
   ) => {
     const application = client.application;
     if (!application) {
-      logger.warn("Slash Commands を登録できませんでした: application が未定義です。");
-      return;
+      const message =
+        "Slash Commands を登録できませんでした: client.application が未定義です。ready イベント前に呼び出された可能性があります。";
+      throw new Error(message);
     }
 
     try {
@@ -441,4 +508,20 @@ function createDefaultCommandRegistrar(
       });
     }
   };
+}
+
+function shouldIgnoreInteractionReplyError(error: unknown): boolean {
+  const code =
+    typeof error === "object" && error !== null
+      ? (error as { code?: number }).code
+      : undefined;
+  if (code === 10062 || code === 40060) {
+    return true;
+  }
+  const message =
+    error instanceof Error ? error.message : error ? String(error) : "";
+  return (
+    message.includes("Unknown interaction") ||
+    message.includes("interaction has already been acknowledged")
+  );
 }

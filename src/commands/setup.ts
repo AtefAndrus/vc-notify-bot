@@ -1,7 +1,6 @@
 import {
   ChatInputCommandInteraction,
   EmbedBuilder,
-  Guild,
   PermissionFlagsBits,
   PermissionsBitField,
 } from "discord.js";
@@ -53,10 +52,26 @@ export async function handleSetupCommand(
     (interaction.client.user
       ? await guild.members
           .fetch(interaction.client.user.id)
-          .catch(() => null)
+          .catch((error) => {
+            const detail =
+              error instanceof Error ? error.message : String(error);
+            logger.warn?.(
+              `SetupCommand: Bot メンバー情報の取得に失敗しました: ${detail}`
+            );
+            return null;
+          })
       : null);
 
-  const botPermissions = botMember?.permissions ?? new PermissionsBitField();
+  if (!botMember) {
+    await interaction.reply({
+      content:
+        "Bot のメンバー情報を取得できませんでした。時間を置いて再度お試しください。",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const botPermissions = botMember.permissions ?? new PermissionsBitField();
   const missingBotPermissions = requiredPermissions.filter(
     (permission) => !botPermissions.has(permission.bit)
   );
@@ -121,6 +136,11 @@ export async function handleSetupCommand(
       name: "不足しているBot権限",
       value: missingBotPermissions.map((permission) => permission.label).join("\n"),
     });
+    embed.addFields({
+      name: "権限の付与方法",
+      value:
+        "サーバー設定 → ロール から Bot のロールに必要な権限を付与するか、招待リンクを再生成して権限付きで追加してください。",
+    });
   }
 
   if (!hasManageGuild) {
@@ -150,46 +170,10 @@ export async function handleSetupCommand(
     });
   }
 
-  // 可能であれば対象チャンネルの権限リンクを示す
-  const problematicChannels = deriveChannelsWithMissingPermissions(
-    guild,
-    missingBotPermissions
-  );
-  if (problematicChannels.length > 0) {
-    embed.addFields({
-      name: "権限を付与するチャンネル候補",
-      value: problematicChannels.join("\n"),
-    });
-  }
-
   await interaction.reply({
     embeds: [embed],
     ephemeral: true,
   });
-}
-
-function deriveChannelsWithMissingPermissions(
-  guild: Guild,
-  missingPermissions: RequiredPermission[]
-): string[] {
-  if (missingPermissions.length === 0) {
-    return [];
-  }
-
-  const cache = guild.channels?.cache;
-  if (!cache || cache.size === 0) {
-    return [];
-  }
-
-  const candidates = cache
-    .filter((channel) => channel.isTextBased())
-    .first(3);
-
-  if (!Array.isArray(candidates) || candidates.length === 0) {
-    return [];
-  }
-
-  return candidates.map((channel) => `<#${channel.id}>`);
 }
 
 export const DEFAULT_REQUIRED_BOT_PERMISSIONS: RequiredPermission[] = [
