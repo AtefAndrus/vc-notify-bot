@@ -14,7 +14,8 @@ import type {
   VoiceStateHandler,
   VoiceStateHandlerDeps,
 } from "@/handlers/voiceState";
-import type { Client } from "discord.js";
+import type { ChatInputCommandInteraction, Client } from "discord.js";
+import { commandDefinitions } from "@/commands/definitions";
 
 const mutableEnv = Bun.env as Record<string, string | undefined>;
 
@@ -231,6 +232,100 @@ describe("bootstrap", () => {
     await Promise.resolve(listener(oldState, newState));
     expect(handleMock).toHaveBeenCalledWith(oldState, newState);
   });
+
+  it("interactionCreate イベントで setup コマンドをハンドラーに委譲する", async () => {
+    mutableEnv.DISCORD_TOKEN = "token";
+
+    const { client, onMock } = createClientStub();
+    const handlerMock = mock(
+      async (_interaction: ChatInputCommandInteraction, _deps: unknown) => {}
+    );
+    const setupDeps = {
+      requiredBotPermissions: [],
+      checkDatabaseReady: async () => true,
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+      },
+    };
+    const depsFactoryMock = mock(() => setupDeps);
+
+    await bootstrap({
+      clientFactory: () => client,
+      ensureDataDir: () => {},
+      setupCommandHandler: handlerMock,
+      setupCommandDepsFactory: depsFactoryMock,
+      registerCommands: async () => {},
+    });
+
+    const interactionListenerCall = onMock.mock.calls.find(
+      ([event]) => event === "interactionCreate"
+    );
+    expect(interactionListenerCall).toBeDefined();
+    if (!interactionListenerCall) {
+      throw new Error("interactionCreate listener is not registered");
+    }
+
+    const listener = interactionListenerCall[1] as (
+      interaction: ChatInputCommandInteraction
+    ) => Promise<void>;
+
+    const interaction = {
+      isChatInputCommand: () => true,
+      commandName: "vc-notify",
+      options: {
+        getSubcommandGroup: () => null,
+        getSubcommand: () => "setup",
+      },
+      replied: false,
+      deferred: false,
+    } as unknown as ChatInputCommandInteraction;
+
+    await listener(interaction);
+
+    expect(depsFactoryMock).toHaveBeenCalledTimes(1);
+    expect(handlerMock).toHaveBeenCalledTimes(1);
+    const [, deps] = handlerMock.mock.calls[0] ?? [];
+    expect(deps).toBe(setupDeps);
+  });
+
+  it("ready イベントで Slash Commands を登録する", async () => {
+    mutableEnv.DISCORD_TOKEN = "token";
+
+    const { client, onceMock } = createClientStub();
+    const registerCommandsMock = mock(async () => {});
+    const logger = {
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    };
+
+    await bootstrap({
+      clientFactory: () => client,
+      ensureDataDir: () => {},
+      logger,
+      registerCommands: registerCommandsMock,
+    });
+
+    const readyListenerCall = onceMock.mock.calls.find(
+      ([event]) => event === "ready"
+    );
+    expect(readyListenerCall).toBeDefined();
+    if (!readyListenerCall) {
+      throw new Error("ready listener is not registered");
+    }
+
+    const readyListener = readyListenerCall[1] as () => void;
+    readyListener();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(registerCommandsMock).toHaveBeenCalledWith(
+      client,
+      commandDefinitions
+    );
+  });
 });
 
 interface ClientStubOptions {
@@ -266,6 +361,11 @@ function createClientStub(
   const loginMock = mock<(token?: string) => Promise<string>>(loginImpl);
 
   const clientPartial: Partial<MinimalClient> = {};
+
+  clientPartial.guilds = {} as any;
+  clientPartial.channels = {} as any;
+  clientPartial.user = { id: "client-user-id" } as any;
+  clientPartial.application = undefined;
 
   clientPartial.once = ((event: any, listener: any) => {
     onceMock(event, listener);

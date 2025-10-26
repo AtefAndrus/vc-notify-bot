@@ -5,6 +5,16 @@ import { Client, GatewayIntentBits } from "discord.js";
 import { Database } from "bun:sqlite";
 
 import {
+  DEFAULT_REQUIRED_BOT_PERMISSIONS,
+  handleSetupCommand,
+  type SetupCommandDeps,
+} from "@/commands/setup";
+import {
+  commandDefinitions,
+  SETUP_SUBCOMMAND_NAME,
+  VC_NOTIFY_COMMAND_NAME,
+} from "@/commands/definitions";
+import {
   createNotificationRuleRepository,
   NotificationRuleRepository,
   NotificationRuleRepositoryDeps,
@@ -25,6 +35,7 @@ import {
   type VoiceStateHandler,
   type VoiceStateHandlerDeps,
 } from "@/handlers/voiceState";
+import type { ChatInputCommandInteraction, Client as DiscordClient } from "discord.js";
 
 export interface AppConfig {
   discordToken: string;
@@ -34,7 +45,13 @@ export interface AppConfig {
   dataDir: string;
 }
 
-export type MinimalClient = Pick<Client, "once" | "login" | "on">;
+export type MinimalClient = Pick<
+  Client,
+  "once" | "login" | "on" | "guilds" | "channels"
+> & {
+  application?: Client["application"];
+  user?: Client["user"];
+};
 
 export interface ApplicationServices {
   ruleService: RuleService;
@@ -67,6 +84,17 @@ export interface BootstrapDependencies {
   voiceStateHandlerFactory?: (
     deps: VoiceStateHandlerDeps
   ) => VoiceStateHandler;
+  setupCommandHandler?: (
+    interaction: ChatInputCommandInteraction,
+    deps: SetupCommandDeps
+  ) => Promise<void>;
+  setupCommandDepsFactory?: (
+    context: SetupCommandDepsFactoryContext
+  ) => SetupCommandDeps;
+  registerCommands?: (
+    client: DiscordClient,
+    definitions: typeof commandDefinitions
+  ) => Promise<void>;
 }
 
 function readEnv(key: string): string | undefined {
@@ -173,6 +201,23 @@ export async function bootstrap(
       logger,
     });
 
+  const setupCommandDeps =
+    deps.setupCommandDepsFactory?.({
+      client: client as DiscordClient,
+      config,
+      logger,
+      notificationRuleRepository,
+      services,
+    }) ??
+    createDefaultSetupCommandDeps({
+      logger,
+      notificationRuleRepository,
+    });
+
+  const setupCommandHandler = deps.setupCommandHandler ?? handleSetupCommand;
+  const registerCommands =
+    deps.registerCommands ?? createDefaultCommandRegistrar(logger);
+
   client.on("voiceStateUpdate", (oldState, newState) =>
     voiceStateHandler
       .handle(oldState, newState)
@@ -185,8 +230,58 @@ export async function bootstrap(
       })
   );
 
+  client.on("interactionCreate", async (interaction) => {
+    if (!interaction.isChatInputCommand()) {
+      return;
+    }
+
+    if (interaction.commandName !== VC_NOTIFY_COMMAND_NAME) {
+      return;
+    }
+
+    const subcommandGroup = interaction.options.getSubcommandGroup(false);
+    const subcommand = interaction.options.getSubcommand(false);
+
+    if (!subcommandGroup && subcommand === SETUP_SUBCOMMAND_NAME) {
+      try {
+        await setupCommandHandler(interaction, setupCommandDeps);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(
+          `SetupCommand: ハンドラー実行中に未処理の例外が発生しました: ${detail}`
+        );
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction
+            .reply({
+              content: "セットアップコマンドの処理中にエラーが発生しました。",
+              ephemeral: true,
+            })
+            .catch(() => {});
+        }
+      }
+      return;
+    }
+
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction
+        .reply({
+          content: "このサブコマンドは現在未対応です。",
+          ephemeral: true,
+        })
+        .catch(() => {});
+    }
+  });
+
   client.once("ready", () => {
     logger.info("Discord client 初期化完了");
+    Promise.resolve(registerCommands(client as DiscordClient, commandDefinitions))
+      .then(() => {
+        logger.info("Slash Commands の登録が完了しました。");
+      })
+      .catch((error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(`Slash Commands の登録に失敗しました: ${detail}`);
+      });
   });
 
   let cleanedUp = false;
@@ -289,5 +384,61 @@ function createClientAccessor() {
         }
       }
     },
+  };
+}
+
+export interface SetupCommandDepsFactoryContext {
+  client: DiscordClient;
+  config: AppConfig;
+  logger: Pick<typeof console, "info" | "warn" | "error">;
+  notificationRuleRepository: NotificationRuleRepository;
+  services: ApplicationServices;
+}
+
+function createDefaultSetupCommandDeps({
+  logger,
+  notificationRuleRepository,
+}: Pick<
+  SetupCommandDepsFactoryContext,
+  "logger" | "notificationRuleRepository"
+>): SetupCommandDeps {
+  return {
+    requiredBotPermissions: DEFAULT_REQUIRED_BOT_PERMISSIONS,
+    logger,
+    now: () => new Date(),
+    checkDatabaseReady: async () => {
+      try {
+        await notificationRuleRepository.countByGuild("__health_check__");
+        return true;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(`SetupCommand: データベース確認に失敗しました: ${detail}`);
+        return false;
+      }
+    },
+  };
+}
+
+function createDefaultCommandRegistrar(
+  logger: Pick<typeof console, "info" | "warn" | "error">
+) {
+  return async (
+    client: DiscordClient,
+    definitions: typeof commandDefinitions
+  ) => {
+    const application = client.application;
+    if (!application) {
+      logger.warn("Slash Commands を登録できませんでした: application が未定義です。");
+      return;
+    }
+
+    try {
+      await application.commands.set(definitions);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Slash Commands の登録に失敗しました: ${detail}`, {
+        cause: error,
+      });
+    }
   };
 }
