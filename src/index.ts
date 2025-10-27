@@ -250,21 +250,6 @@ export async function bootstrap(
   );
 
   client.on("interactionCreate", async (interaction) => {
-    const respondRuleError = async (message: string) => {
-      if (!interaction.isRepliable()) {
-        return;
-      }
-      if (interaction.replied || interaction.deferred) {
-        await interaction
-          .followUp({ content: message, ephemeral: true })
-          .catch(() => undefined);
-      } else {
-        await interaction
-          .reply({ content: message, ephemeral: true })
-          .catch(() => undefined);
-      }
-    };
-
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName !== VC_NOTIFY_COMMAND_NAME) {
         return;
@@ -311,7 +296,8 @@ export async function bootstrap(
           logger.error(
             `RuleCommand: /vc-notify rule add 実行中にエラーが発生しました: ${detail}`
           );
-          await respondRuleError(
+          await ruleCommand.respondError(
+            interaction,
             "ルール作成フローの開始中にエラーが発生しました。時間を置いて再度お試しください。"
           );
         }
@@ -348,7 +334,8 @@ export async function bootstrap(
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         logger.error(`RuleCommand: モーダル処理中にエラーが発生しました: ${detail}`);
-        await respondRuleError(
+        await ruleCommand.respondError(
+          interaction,
           "ルール作成フローの処理中にエラーが発生しました。時間を置いて再度お試しください。"
         );
       }
@@ -366,7 +353,8 @@ export async function bootstrap(
         logger.error(
           `RuleCommand: チャンネル選択処理中にエラーが発生しました: ${detail}`
         );
-        await respondRuleError(
+        await ruleCommand.respondError(
+          interaction,
           "ルール作成フローの処理中にエラーが発生しました。時間を置いて再度お試しください。"
         );
       }
@@ -384,7 +372,8 @@ export async function bootstrap(
         logger.error(
           `RuleCommand: ユーザー選択処理中にエラーが発生しました: ${detail}`
         );
-        await respondRuleError(
+        await ruleCommand.respondError(
+          interaction,
           "ルール作成フローの処理中にエラーが発生しました。時間を置いて再度お試しください。"
         );
       }
@@ -400,7 +389,8 @@ export async function bootstrap(
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         logger.error(`RuleCommand: ボタン処理中にエラーが発生しました: ${detail}`);
-        await respondRuleError(
+        await ruleCommand.respondError(
+          interaction,
           "ルール作成フローの処理中にエラーが発生しました。時間を置いて再度お試しください。"
         );
       }
@@ -437,6 +427,13 @@ export async function bootstrap(
       return;
     }
     cleanedUp = true;
+    try {
+      ruleCommand.dispose();
+    } catch (rawError) {
+      const message =
+        rawError instanceof Error ? rawError.message : String(rawError);
+      logger.error(`RuleCommand cleanup failed: ${message}`);
+    }
     try {
       notifyService.cleanup();
     } catch (rawError) {

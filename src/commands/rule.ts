@@ -19,6 +19,7 @@ import {
   UserSelectMenuBuilder,
   UserSelectMenuInteraction,
   type APIEmbedField,
+  type RepliableInteraction,
 } from "discord.js";
 
 import {
@@ -30,6 +31,7 @@ import {
 const RULE_ADD_CUSTOM_ID_PREFIX = "rule-add";
 const RULE_NAME_TEXT_INPUT_ID = "rule_name";
 const SESSION_TTL_MS = 5 * 60 * 1000;
+const SESSION_CLEANUP_INTERVAL_MS = 60 * 1000;
 const TARGET_USER_SELECT_MAX = 25;
 
 type RuleAddStep =
@@ -74,11 +76,13 @@ export interface RuleCommandSessionStore {
   delete: (sessionId: string) => void;
   findByUser: (guildId: string, userId: string) => RuleAddSession | undefined;
   cleanupExpired: (now: Date) => void;
+  withSessionLock: <T>(sessionId: string, callback: () => Promise<T>) => Promise<T>;
 }
 
 class InMemoryRuleCommandSessionStore implements RuleCommandSessionStore {
   private readonly sessions = new Map<string, RuleAddSession>();
   private readonly sessionIdByUser = new Map<string, string>();
+  private readonly locks = new Map<string, Promise<void>>();
 
   get(sessionId: string): RuleAddSession | undefined {
     return this.sessions.get(sessionId);
@@ -118,6 +122,26 @@ class InMemoryRuleCommandSessionStore implements RuleCommandSessionStore {
     }
   }
 
+  async withSessionLock<T>(sessionId: string, callback: () => Promise<T>): Promise<T> {
+    const previous = this.locks.get(sessionId) ?? Promise.resolve();
+    let release: (() => void) | undefined;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    this.locks.set(sessionId, previous.then(() => next));
+    await previous;
+
+    try {
+      return await callback();
+    } finally {
+      release?.();
+      if (this.locks.get(sessionId) === next) {
+        this.locks.delete(sessionId);
+      }
+    }
+  }
+
   private userKey(guildId: string, userId: string): string {
     return `${guildId}:${userId}`;
   }
@@ -136,12 +160,37 @@ export class RuleCommand {
   private readonly now: () => Date;
   private readonly generateId: () => string;
   private readonly sessionStore: RuleCommandSessionStore;
+  private cleanupInterval?: ReturnType<typeof setInterval>;
 
   constructor(private readonly deps: RuleCommandDeps) {
     this.logger = deps.logger ?? console;
     this.now = deps.now ?? (() => new Date());
     this.generateId = deps.generateId ?? (() => randomUUID());
     this.sessionStore = deps.sessionStore ?? new InMemoryRuleCommandSessionStore();
+    this.startCleanupTimer();
+  }
+
+  dispose(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = undefined;
+    }
+  }
+
+  private startCleanupTimer(): void {
+    this.cleanupInterval = setInterval(() => {
+      this.sessionStore.cleanupExpired(this.now());
+    }, SESSION_CLEANUP_INTERVAL_MS);
+
+    const interval = this.cleanupInterval as unknown;
+    if (
+      interval &&
+      typeof interval === "object" &&
+      "unref" in interval &&
+      typeof (interval as { unref: () => void }).unref === "function"
+    ) {
+      (interval as { unref: () => void }).unref();
+    }
   }
 
   async handleAddCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -211,27 +260,44 @@ export class RuleCommand {
       return true;
     }
 
-    const session = this.resolveSession(parsed.sessionId, interaction.guildId, interaction.user.id);
-    if (!session || session.step !== "awaitingName") {
-      await this.replySessionExpired(interaction);
-      if (session) {
-        this.sessionStore.delete(session.id);
+    return this.sessionStore.withSessionLock(parsed.sessionId, async () => {
+      const session = this.resolveSession(
+        parsed.sessionId,
+        interaction.guildId!,
+        interaction.user.id
+      );
+      if (!session || session.step !== "awaitingName") {
+        await this.replySessionExpired(interaction);
+        if (session) {
+          this.sessionStore.delete(session.id);
+        }
+        return true;
       }
+
+      const ruleName = interaction.fields
+        .getTextInputValue(RULE_NAME_TEXT_INPUT_ID)
+        .trim();
+      if (!ruleName) {
+        await this.replyEphemeral(
+          interaction,
+          "ルール名に空白のみを入力することはできません。もう一度 `/vc-notify rule add` を実行してください。"
+        );
+        this.sessionStore.delete(session.id);
+        return true;
+      }
+
+      session.ruleName = ruleName;
+      session.step = "awaitingVoiceChannels";
+      this.renewSession(session);
+
+      await interaction.reply({
+        content: "監視するボイスチャンネルを選択してください (1〜10件)。",
+        components: [this.buildVoiceChannelSelectRow(session.id)],
+        ephemeral: true,
+      });
+
       return true;
-    }
-
-    const ruleName = interaction.fields.getTextInputValue(RULE_NAME_TEXT_INPUT_ID).trim();
-    session.ruleName = ruleName;
-    session.step = "awaitingVoiceChannels";
-    this.renewSession(session);
-
-    await interaction.reply({
-      content: "監視するボイスチャンネルを選択してください (1〜10件)。",
-      components: [this.buildVoiceChannelSelectRow(session.id)],
-      ephemeral: true,
     });
-
-    return true;
   }
 
   async handleChannelSelect(
@@ -249,55 +315,67 @@ export class RuleCommand {
       return true;
     }
 
-    const session = this.resolveSession(parsed.sessionId, interaction.guildId, interaction.user.id);
-    if (!session) {
-      await this.updateSessionExpired(interaction);
-      return true;
-    }
-
-    if (parsed.action === "selectVoiceChannels") {
-      if (session.step !== "awaitingVoiceChannels") {
-        await this.updateSessionExpired(interaction, true);
-        this.sessionStore.delete(session.id);
+    return this.sessionStore.withSessionLock(parsed.sessionId, async () => {
+      const session = this.resolveSession(
+        parsed.sessionId,
+        interaction.guildId!,
+        interaction.user.id
+      );
+      if (!session) {
+        await this.updateSessionExpired(interaction);
         return true;
       }
 
-      session.watchedVoiceChannelIds = [...interaction.values];
-      session.step = "awaitingTargetUsers";
-      this.renewSession(session);
+      if (parsed.action === "selectVoiceChannels") {
+        if (session.step !== "awaitingVoiceChannels") {
+          await this.updateSessionExpired(interaction, true);
+          this.sessionStore.delete(session.id);
+          return true;
+        }
 
-      await interaction.update({
-        content:
-          "通知対象ユーザーを選択してください (最大25件)。選択しない場合は「全員対象」を押してください。",
-        components: [
-          this.buildTargetUserSelectRow(session.id),
-          this.buildSkipTargetUsersRow(session.id),
-        ],
-      });
-      return true;
-    }
+        session.watchedVoiceChannelIds = [...interaction.values];
+        session.step = "awaitingTargetUsers";
+        this.renewSession(session);
 
-    if (parsed.action === "selectNotificationChannel") {
-      if (session.step !== "awaitingNotificationChannel") {
-        await this.updateSessionExpired(interaction, true);
-        this.sessionStore.delete(session.id);
+        await interaction.update({
+          content:
+            "通知対象ユーザーを選択してください (最大25件)。選択しない場合は「全員対象」を押してください。",
+          components: [
+            this.buildTargetUserSelectRow(session.id),
+            this.buildSkipTargetUsersRow(session.id),
+          ],
+        });
         return true;
       }
 
-      const [notificationChannelId] = interaction.values;
-      session.notificationChannelId = notificationChannelId;
-      session.step = "awaitingConfirmation";
-      this.renewSession(session);
+      if (parsed.action === "selectNotificationChannel") {
+        if (session.step !== "awaitingNotificationChannel") {
+          await this.updateSessionExpired(interaction, true);
+          this.sessionStore.delete(session.id);
+          return true;
+        }
 
-      await interaction.update({
-        content: "以下の内容でルールを作成します。問題なければ「作成」を押してください。",
-        embeds: [this.buildConfirmationEmbed(session)],
-        components: [this.buildConfirmationButtons(session.id)],
-      });
-      return true;
-    }
+        const [notificationChannelId] = interaction.values;
+        if (!notificationChannelId) {
+          await this.updateSessionExpired(interaction, true);
+          this.sessionStore.delete(session.id);
+          return true;
+        }
 
-    return false;
+        session.notificationChannelId = notificationChannelId;
+        session.step = "awaitingConfirmation";
+        this.renewSession(session);
+
+        await interaction.update({
+          content: "以下の内容でルールを作成します。問題なければ「作成」を押してください。",
+          embeds: [this.buildConfirmationEmbed(session)],
+          components: [this.buildConfirmationButtons(session.id)],
+        });
+        return true;
+      }
+
+      return false;
+    });
   }
 
   async handleUserSelect(
@@ -315,33 +393,32 @@ export class RuleCommand {
       return true;
     }
 
-    const session = this.resolveSession(parsed.sessionId, interaction.guildId, interaction.user.id);
-    if (!session || session.step !== "awaitingTargetUsers") {
-      await this.updateSessionExpired(interaction, true);
-      if (session) {
-        this.sessionStore.delete(session.id);
-      }
-      return true;
-    }
-
-    if (interaction.values.length > TARGET_USER_SELECT_MAX) {
-      await this.replyEphemeral(
-        interaction,
-        `ユーザーは最大 ${TARGET_USER_SELECT_MAX} 件まで選択できます。`
+    return this.sessionStore.withSessionLock(parsed.sessionId, async () => {
+      const session = this.resolveSession(
+        parsed.sessionId,
+        interaction.guildId!,
+        interaction.user.id
       );
+      if (!session || session.step !== "awaitingTargetUsers") {
+        await this.updateSessionExpired(interaction, true);
+        if (session) {
+          this.sessionStore.delete(session.id);
+        }
+        return true;
+      }
+
+      // Discord API enforces the 25-user limit server-side via maxValues configuration.
+      session.targetUserIds = [...interaction.values];
+      session.step = "awaitingNotificationChannel";
+      this.renewSession(session);
+
+      await interaction.update({
+        content: "通知先のテキストチャンネルを選択してください。",
+        components: [this.buildNotificationChannelSelectRow(session.id)],
+      });
+
       return true;
-    }
-
-    session.targetUserIds = [...interaction.values];
-    session.step = "awaitingNotificationChannel";
-    this.renewSession(session);
-
-    await interaction.update({
-      content: "通知先のテキストチャンネルを選択してください。",
-      components: [this.buildNotificationChannelSelectRow(session.id)],
     });
-
-    return true;
   }
 
   async handleButton(interaction: ButtonInteraction): Promise<boolean> {
@@ -357,81 +434,115 @@ export class RuleCommand {
       return true;
     }
 
-    const session = this.resolveSession(parsed.sessionId, interaction.guildId, interaction.user.id);
-    if (!session) {
-      await this.updateSessionExpired(interaction);
-      return true;
-    }
-
-    switch (parsed.action) {
-      case "skipTargetUsers":
-        if (session.step !== "awaitingTargetUsers") {
-          await this.updateSessionExpired(interaction, true);
-          this.sessionStore.delete(session.id);
-          return true;
-        }
-
-        session.targetUserIds = [];
-        session.step = "awaitingNotificationChannel";
-        this.renewSession(session);
-
-        await interaction.update({
-          content: "通知先のテキストチャンネルを選択してください。",
-          components: [this.buildNotificationChannelSelectRow(session.id)],
-        });
+    return this.sessionStore.withSessionLock(parsed.sessionId, async () => {
+      const session = this.resolveSession(
+        parsed.sessionId,
+        interaction.guildId!,
+        interaction.user.id
+      );
+      if (!session) {
+        await this.updateSessionExpired(interaction);
         return true;
+      }
 
-      case "cancel":
-        await interaction.update({
-          content: "ルール作成をキャンセルしました。必要であれば再度 `/vc-notify rule add` を実行してください。",
-          components: [],
-          embeds: [],
-        });
-        this.sessionStore.delete(session.id);
-        return true;
+      switch (parsed.action) {
+        case "skipTargetUsers":
+          if (session.step !== "awaitingTargetUsers") {
+            await this.updateSessionExpired(interaction, true);
+            this.sessionStore.delete(session.id);
+            return true;
+          }
 
-      case "confirm":
-        if (!this.isSessionReadyForCreation(session)) {
+          session.targetUserIds = [];
+          session.step = "awaitingNotificationChannel";
+          this.renewSession(session);
+
           await interaction.update({
-            content: "セッションの状態が不正です。もう一度 `/vc-notify rule add` を実行してください。",
+            content: "通知先のテキストチャンネルを選択してください。",
+            components: [this.buildNotificationChannelSelectRow(session.id)],
+          });
+          return true;
+
+        case "cancel":
+          await interaction.update({
+            content: "ルール作成をキャンセルしました。必要であれば再度 `/vc-notify rule add` を実行してください。",
             components: [],
             embeds: [],
           });
           this.sessionStore.delete(session.id);
           return true;
-        }
 
-        try {
-          const rule = await this.deps.ruleService.createRule({
-            guildId: session.guildId,
-            name: session.ruleName!,
-            watchedVoiceChannelIds: session.watchedVoiceChannelIds,
-            targetUserIds: session.targetUserIds,
-            notificationChannelId: session.notificationChannelId!,
-          });
+        case "confirm":
+          if (!this.isSessionReadyForCreation(session)) {
+            await interaction.update({
+              content: "セッションの状態が不正です。もう一度 `/vc-notify rule add` を実行してください。",
+              components: [],
+              embeds: [],
+            });
+            this.sessionStore.delete(session.id);
+            return true;
+          }
 
-          await interaction.update({
-            content: undefined,
-            embeds: [
-              new EmbedBuilder()
-                .setColor(0x00ff00)
-                .setTitle("ルール作成完了")
-                .setDescription(`ルール「${rule.name}」を作成しました。`)
-                .addFields(this.buildSummaryFields(session))
-                .setFooter({ text: `ルールID: ${rule.id}` }),
-            ],
-            components: [],
-          });
-        } catch (error) {
-          await this.handleRuleCreationError(interaction, error, session);
-        } finally {
-          this.sessionStore.delete(session.id);
-        }
-        return true;
+          const validation = await this.validateNotificationChannel(interaction, session);
+          if (!validation.ok) {
+            await interaction.update({
+              content: undefined,
+              embeds: [validation.embed],
+              components: [],
+            });
+            this.sessionStore.delete(session.id);
+            return true;
+          }
 
-      default:
-        return false;
+          try {
+            const rule = await this.deps.ruleService.createRule({
+              guildId: session.guildId,
+              name: session.ruleName!,
+              watchedVoiceChannelIds: session.watchedVoiceChannelIds,
+              targetUserIds: session.targetUserIds,
+              notificationChannelId: session.notificationChannelId!,
+            });
+
+            await interaction.update({
+              content: undefined,
+              embeds: [
+                new EmbedBuilder()
+                  .setColor(0x00ff00)
+                  .setTitle("ルール作成完了")
+                  .setDescription(`ルール「${rule.name}」を作成しました。`)
+                  .addFields(this.buildSummaryFields(session))
+                  .setFooter({ text: `ルールID: ${rule.id}` }),
+              ],
+              components: [],
+            });
+          } catch (error) {
+            await this.handleRuleCreationError(interaction, error, session);
+          } finally {
+            this.sessionStore.delete(session.id);
+          }
+          return true;
+
+        default:
+          return false;
+      }
+    });
+  }
+
+  async respondError(interaction: RepliableInteraction, message: string): Promise<void> {
+    if (!interaction.isRepliable()) {
+      return;
     }
+
+    if (interaction.replied || interaction.deferred) {
+      await interaction
+        .followUp({ content: message, ephemeral: true })
+        .catch(() => undefined);
+      return;
+    }
+
+    await interaction
+      .reply({ content: message, ephemeral: true })
+      .catch(() => undefined);
   }
 
   private buildRuleNameModal(sessionId: string): ModalBuilder {
@@ -544,6 +655,106 @@ export class RuleCommand {
         .setLabel("キャンセル")
         .setStyle(ButtonStyle.Danger)
     );
+  }
+
+  private async validateNotificationChannel(
+    interaction: ButtonInteraction,
+    session: RuleAddSession
+  ): Promise<{ ok: true } | { ok: false; embed: EmbedBuilder }> {
+    const channelId = session.notificationChannelId;
+    const channelMention = channelId ? `<#${channelId}>` : "";
+    if (!channelId) {
+      return {
+        ok: false,
+        embed: new EmbedBuilder()
+          .setColor(0xff0000)
+          .setTitle("ルール作成に失敗しました")
+          .setDescription("通知先チャンネルが設定されていません。もう一度やり直してください。"),
+      };
+    }
+
+    const channel = await this.fetchNotificationChannel(interaction, channelId);
+    if (!channel) {
+      return {
+        ok: false,
+        embed: new EmbedBuilder()
+          .setColor(0xff0000)
+          .setTitle("ルール作成に失敗しました")
+          .setDescription(
+            "指定された通知先チャンネルが見つからないか、テキストチャンネルではありません。"
+          ),
+      };
+    }
+
+    const clientUser = interaction.client.user;
+    if (!clientUser) {
+      return {
+        ok: false,
+        embed: new EmbedBuilder()
+          .setColor(0xff0000)
+          .setTitle("ルール作成に失敗しました")
+          .setDescription("Bot のクライアント情報を取得できないため、通知先チャンネルを検証できませんでした。"),
+      };
+    }
+
+    const permissions =
+      typeof channel.permissionsFor === "function"
+        ? channel.permissionsFor(clientUser)
+        : null;
+    const hasView = permissions?.has(PermissionFlagsBits.ViewChannel) ?? false;
+    const hasSend = permissions?.has(PermissionFlagsBits.SendMessages) ?? false;
+
+    if (!hasView || !hasSend) {
+      return {
+        ok: false,
+        embed: new EmbedBuilder()
+          .setColor(0xff0000)
+          .setTitle("ルール作成に失敗しました")
+          .setDescription(
+            `${channelMention} にメッセージを送信する権限がありません。VIEW_CHANNEL と SEND_MESSAGES 権限を付与してから再度お試しください。`
+          ),
+      };
+    }
+
+    return { ok: true };
+  }
+
+  private async fetchNotificationChannel(
+    interaction: ButtonInteraction,
+    channelId: string
+  ): Promise<any> {
+    if (!interaction.guild) {
+      return null;
+    }
+
+    try {
+      const channel = await interaction.guild.channels.fetch(channelId);
+      if (!channel) {
+        return null;
+      }
+
+      const maybeText = channel as {
+        isTextBased?: () => boolean;
+        permissionsFor?: (user: typeof interaction.client.user) => unknown;
+      };
+      if (typeof maybeText.isTextBased === "function" && !maybeText.isTextBased()) {
+        return null;
+      }
+
+      if (typeof maybeText.permissionsFor !== "function") {
+        return null;
+      }
+
+      return maybeText;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.warn("RuleCommand: 通知チャンネルの取得に失敗しました", {
+        guildId: interaction.guildId,
+        channelId,
+        detail,
+      });
+      return null;
+    }
   }
 
   private async handleRuleCreationError(

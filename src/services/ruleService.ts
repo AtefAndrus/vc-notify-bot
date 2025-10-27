@@ -294,7 +294,8 @@ function validateCommonRuleFields(
   const violations: string[] = [];
 
   const name = typeof input.name === "string" ? input.name.trim() : "";
-  if (!name || name.length < NAME_MIN_LENGTH || name.length > NAME_MAX_LENGTH) {
+  const nameLength = [...name].length;
+  if (!name || nameLength < NAME_MIN_LENGTH || nameLength > NAME_MAX_LENGTH) {
     violations.push("name must be between 1 and 50 characters.");
   }
 
