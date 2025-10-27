@@ -11,9 +11,15 @@ import {
 } from "@/commands/setup";
 import {
   commandDefinitions,
+  RULE_SUBCOMMAND_GROUP_NAME,
   SETUP_SUBCOMMAND_NAME,
   VC_NOTIFY_COMMAND_NAME,
 } from "@/commands/definitions";
+import {
+  createRuleCommand,
+  type RuleCommand,
+  type RuleCommandDeps,
+} from "@/commands/rule";
 import {
   createNotificationRuleRepository,
   NotificationRuleRepository,
@@ -84,6 +90,7 @@ export interface BootstrapDependencies {
   voiceStateHandlerFactory?: (
     deps: VoiceStateHandlerDeps
   ) => VoiceStateHandler;
+  ruleCommandFactory?: (deps: RuleCommandDeps) => RuleCommand;
   setupCommandHandler?: (
     interaction: ChatInputCommandInteraction,
     deps: SetupCommandDeps
@@ -188,6 +195,16 @@ export async function bootstrap(
     notifyService,
   };
 
+  const ruleCommand =
+    deps.ruleCommandFactory?.({
+      ruleService,
+      logger,
+    }) ??
+    createRuleCommand({
+      ruleService,
+      logger,
+    });
+
   const client = (deps.clientFactory ?? defaultClientFactory)(
     config,
     services
@@ -233,64 +250,160 @@ export async function bootstrap(
   );
 
   client.on("interactionCreate", async (interaction) => {
-    if (!interaction.isChatInputCommand()) {
-      return;
-    }
+    const respondRuleError = async (message: string) => {
+      if (!interaction.isRepliable()) {
+        return;
+      }
+      if (interaction.replied || interaction.deferred) {
+        await interaction
+          .followUp({ content: message, ephemeral: true })
+          .catch(() => undefined);
+      } else {
+        await interaction
+          .reply({ content: message, ephemeral: true })
+          .catch(() => undefined);
+      }
+    };
 
-    if (interaction.commandName !== VC_NOTIFY_COMMAND_NAME) {
-      return;
-    }
+    if (interaction.isChatInputCommand()) {
+      if (interaction.commandName !== VC_NOTIFY_COMMAND_NAME) {
+        return;
+      }
 
-    const subcommandGroup = interaction.options.getSubcommandGroup(false);
-    const subcommand = interaction.options.getSubcommand(false);
+      const subcommandGroup = interaction.options.getSubcommandGroup(false);
+      const subcommand = interaction.options.getSubcommand(false);
 
-    if (!subcommandGroup && subcommand === SETUP_SUBCOMMAND_NAME) {
-      try {
-        await setupCommandHandler(interaction, setupCommandDeps);
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        logger.error(
-          `SetupCommand: ハンドラー実行中に未処理の例外が発生しました: ${detail}`
-        );
-        if (!interaction.replied && !interaction.deferred) {
-          await interaction
-            .reply({
-              content: "セットアップコマンドの処理中にエラーが発生しました。",
-              ephemeral: true,
-            })
-            .catch((replyError) => {
-              if (!shouldIgnoreInteractionReplyError(replyError)) {
-                const replyDetail =
-                  replyError instanceof Error
-                    ? replyError.message
-                    : String(replyError);
-                logger.error(
-                  `SetupCommand: エラー応答の送信に失敗しました: ${replyDetail}`
-                );
-              }
-            });
+      if (!subcommandGroup && subcommand === SETUP_SUBCOMMAND_NAME) {
+        try {
+          await setupCommandHandler(interaction, setupCommandDeps);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          logger.error(
+            `SetupCommand: ハンドラー実行中に未処理の例外が発生しました: ${detail}`
+          );
+          if (!interaction.replied && !interaction.deferred) {
+            await interaction
+              .reply({
+                content: "セットアップコマンドの処理中にエラーが発生しました。",
+                ephemeral: true,
+              })
+              .catch((replyError) => {
+                if (!shouldIgnoreInteractionReplyError(replyError)) {
+                  const replyDetail =
+                    replyError instanceof Error
+                      ? replyError.message
+                      : String(replyError);
+                  logger.error(
+                    `SetupCommand: エラー応答の送信に失敗しました: ${replyDetail}`
+                  );
+                }
+              });
+          }
         }
+        return;
+      }
+
+      if (subcommandGroup === RULE_SUBCOMMAND_GROUP_NAME && subcommand === "add") {
+        try {
+          await ruleCommand.handleAddCommand(interaction);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          logger.error(
+            `RuleCommand: /vc-notify rule add 実行中にエラーが発生しました: ${detail}`
+          );
+          await respondRuleError(
+            "ルール作成フローの開始中にエラーが発生しました。時間を置いて再度お試しください。"
+          );
+        }
+        return;
+      }
+
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction
+          .reply({
+            content: "このサブコマンドは現在未対応です。",
+            ephemeral: true,
+          })
+          .catch((replyError) => {
+            if (!shouldIgnoreInteractionReplyError(replyError)) {
+              const replyDetail =
+                replyError instanceof Error
+                  ? replyError.message
+                  : String(replyError);
+              logger.error(
+                `SetupCommand: 未対応サブコマンドへの応答に失敗しました: ${replyDetail}`
+              );
+            }
+          });
       }
       return;
     }
 
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction
-        .reply({
-          content: "このサブコマンドは現在未対応です。",
-          ephemeral: true,
-        })
-        .catch((replyError) => {
-          if (!shouldIgnoreInteractionReplyError(replyError)) {
-            const replyDetail =
-              replyError instanceof Error
-                ? replyError.message
-                : String(replyError);
-            logger.error(
-              `SetupCommand: 未対応サブコマンドへの応答に失敗しました: ${replyDetail}`
-            );
-          }
-        });
+    if (interaction.isModalSubmit()) {
+      try {
+        const handled = await ruleCommand.handleModalSubmit(interaction);
+        if (handled) {
+          return;
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(`RuleCommand: モーダル処理中にエラーが発生しました: ${detail}`);
+        await respondRuleError(
+          "ルール作成フローの処理中にエラーが発生しました。時間を置いて再度お試しください。"
+        );
+      }
+      return;
+    }
+
+    if (interaction.isChannelSelectMenu()) {
+      try {
+        const handled = await ruleCommand.handleChannelSelect(interaction);
+        if (handled) {
+          return;
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(
+          `RuleCommand: チャンネル選択処理中にエラーが発生しました: ${detail}`
+        );
+        await respondRuleError(
+          "ルール作成フローの処理中にエラーが発生しました。時間を置いて再度お試しください。"
+        );
+      }
+      return;
+    }
+
+    if (interaction.isUserSelectMenu()) {
+      try {
+        const handled = await ruleCommand.handleUserSelect(interaction);
+        if (handled) {
+          return;
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(
+          `RuleCommand: ユーザー選択処理中にエラーが発生しました: ${detail}`
+        );
+        await respondRuleError(
+          "ルール作成フローの処理中にエラーが発生しました。時間を置いて再度お試しください。"
+        );
+      }
+      return;
+    }
+
+    if (interaction.isButton()) {
+      try {
+        const handled = await ruleCommand.handleButton(interaction);
+        if (handled) {
+          return;
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        logger.error(`RuleCommand: ボタン処理中にエラーが発生しました: ${detail}`);
+        await respondRuleError(
+          "ルール作成フローの処理中にエラーが発生しました。時間を置いて再度お試しください。"
+        );
+      }
     }
   });
 

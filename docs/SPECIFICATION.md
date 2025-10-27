@@ -139,7 +139,7 @@ interface NotificationRule {
 
 - name: 1-50 文字、重複許可
 - watchedVoiceChannelIds: 1-10 チャンネル
-- targetUserIds: 0-50 ユーザー
+- targetUserIds: 0-50 ユーザー（UI では 1 回の選択につき 25 件まで）
 - notificationChannelId: テキストチャンネルのみ
 
 **応答例**
@@ -707,7 +707,7 @@ interface NotificationRule {
   guildId: string; // Discord Snowflake
   name: string; // 1-50文字
   watchedVoiceChannelIds: string[]; // 1-10要素
-  targetUserIds: string[]; // 0-50要素
+  targetUserIds: string[]; // 0-50要素（UI は 25 件まで同時選択）
   notificationChannelId: string; // Discord Snowflake
   enabled: boolean; // デフォルト: true
   createdAt: Date;
@@ -769,6 +769,7 @@ const RuleValidation = {
     minItems: 0,
     maxItems: 50,
     itemPattern: /^\d{17,19}$/,
+    // UI の UserSelectMenu は 1 回の選択につき最大 25 件
   },
 };
 ```
