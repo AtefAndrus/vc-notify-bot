@@ -14,7 +14,8 @@ import type {
   VoiceStateHandler,
   VoiceStateHandlerDeps,
 } from "@/handlers/voiceState";
-import type { Client } from "discord.js";
+import type { ChatInputCommandInteraction, Client } from "discord.js";
+import { commandDefinitions } from "@/commands/definitions";
 
 const mutableEnv = Bun.env as Record<string, string | undefined>;
 
@@ -231,11 +232,169 @@ describe("bootstrap", () => {
     await Promise.resolve(listener(oldState, newState));
     expect(handleMock).toHaveBeenCalledWith(oldState, newState);
   });
+
+  it("interactionCreate イベントで setup コマンドをハンドラーに委譲する", async () => {
+    mutableEnv.DISCORD_TOKEN = "token";
+
+    const { client, onMock } = createClientStub();
+    const handlerMock = mock(
+      async (_interaction: ChatInputCommandInteraction, _deps: unknown) => {}
+    );
+    const setupDeps = {
+      requiredBotPermissions: [],
+      checkDatabaseReady: async () => true,
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+      },
+    };
+    const depsFactoryMock = mock(() => setupDeps);
+
+    await bootstrap({
+      clientFactory: () => client,
+      ensureDataDir: () => {},
+      setupCommandHandler: handlerMock,
+      setupCommandDepsFactory: depsFactoryMock,
+      registerCommands: async () => {},
+    });
+
+    const interactionListenerCall = onMock.mock.calls.find(
+      ([event]) => event === "interactionCreate"
+    );
+    expect(interactionListenerCall).toBeDefined();
+    if (!interactionListenerCall) {
+      throw new Error("interactionCreate listener is not registered");
+    }
+
+    const listener = interactionListenerCall[1] as (
+      interaction: ChatInputCommandInteraction
+    ) => Promise<void>;
+
+    const interaction = {
+      isChatInputCommand: () => true,
+      commandName: "vc-notify",
+      options: {
+        getSubcommandGroup: () => null,
+        getSubcommand: () => "setup",
+      },
+      replied: false,
+      deferred: false,
+    } as unknown as ChatInputCommandInteraction;
+
+    await listener(interaction);
+
+    expect(depsFactoryMock).toHaveBeenCalledTimes(1);
+    expect(handlerMock).toHaveBeenCalledTimes(1);
+    const [, deps] = handlerMock.mock.calls[0] ?? [];
+    expect(deps).toBe(setupDeps);
+  });
+
+  it("ready イベントで Slash Commands を登録する", async () => {
+    mutableEnv.DISCORD_TOKEN = "token";
+
+    const { client, onceMock, destroyMock } = createClientStub();
+    const registerCommandsMock = mock(async () => {});
+    const logger = {
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    };
+
+    await bootstrap({
+      clientFactory: () => client,
+      ensureDataDir: () => {},
+      logger,
+      registerCommands: registerCommandsMock,
+    });
+
+    const readyListenerCall = onceMock.mock.calls.find(
+      ([event]) => event === "ready"
+    );
+    expect(readyListenerCall).toBeDefined();
+    if (!readyListenerCall) {
+      throw new Error("ready listener is not registered");
+    }
+
+    const readyListener = readyListenerCall[1] as () => Promise<void>;
+    await readyListener();
+
+    expect(registerCommandsMock).toHaveBeenCalledWith(
+      client,
+      commandDefinitions
+    );
+    expect(destroyMock).not.toHaveBeenCalled();
+  });
+
+  it("Slash Commands 登録に失敗した場合に Bot を停止する", async () => {
+    mutableEnv.DISCORD_TOKEN = "token";
+
+    const { client, onceMock, destroyMock } = createClientStub();
+    const registerCommandsMock = mock(async () => {
+      throw new Error("API rate limit exceeded");
+    });
+    const errorMock = mock((message?: unknown) => {});
+    const logger = {
+      info: () => {},
+      warn: () => {},
+      error: errorMock,
+    };
+
+    const originalExit = process.exit;
+    const exitCalls: number[] = [];
+    const exitMock = mock((code?: number) => {
+      exitCalls.push(code ?? 0);
+      throw new Error("process.exit invoked");
+    });
+    process.exit = ((code?: number) => exitMock(code)) as typeof process.exit;
+
+    try {
+      await bootstrap({
+        clientFactory: () => client,
+        ensureDataDir: () => {},
+        logger,
+        registerCommands: registerCommandsMock,
+      });
+
+      const readyListenerCall = onceMock.mock.calls.find(
+        ([event]) => event === "ready"
+      );
+      expect(readyListenerCall).toBeDefined();
+      if (!readyListenerCall) {
+        throw new Error("ready listener is not registered");
+      }
+
+      const readyListener = readyListenerCall[1] as () => Promise<void>;
+      await expect(readyListener()).rejects.toThrow("process.exit invoked");
+    } finally {
+      process.exit = originalExit;
+    }
+
+    expect(registerCommandsMock).toHaveBeenCalledWith(
+      client,
+      commandDefinitions
+    );
+    expect(destroyMock).toHaveBeenCalledTimes(1);
+    expect(exitCalls).toEqual([1]);
+    const errorMessages: string[] = [];
+    for (const callArgs of errorMock.mock.calls) {
+      errorMessages.push(String(callArgs[0] ?? ""));
+    }
+    expect(
+      errorMessages.some((msg) =>
+        msg.includes("Slash Commands の登録に失敗しました")
+      )
+    ).toBeTrue();
+    expect(
+      errorMessages.some((msg) => msg.includes("Bot を停止します。"))
+    ).toBeTrue();
+  });
 });
 
 interface ClientStubOptions {
   login?: (token?: string) => Promise<string>;
   on?: (event: string, listener: (...args: unknown[]) => void) => void;
+  destroy?: () => Promise<void>;
 }
 
 function createClientStub(
@@ -252,6 +411,7 @@ function createClientStub(
       (event: string, listener: (...args: unknown[]) => void) => void
     >
   >;
+  destroyMock: ReturnType<typeof mock<() => Promise<void>>>;
   loginMock: ReturnType<typeof mock<(token?: string) => Promise<string>>>;
 } {
   const onceMock = mock<
@@ -264,8 +424,15 @@ function createClientStub(
   const loginImpl =
     options.login ?? ((token?: string) => Promise.resolve(token ?? ""));
   const loginMock = mock<(token?: string) => Promise<string>>(loginImpl);
+  const destroyImpl = options.destroy ?? (async () => {});
+  const destroyMock = mock<() => Promise<void>>(destroyImpl);
 
   const clientPartial: Partial<MinimalClient> = {};
+
+  clientPartial.guilds = {} as any;
+  clientPartial.channels = {} as any;
+  clientPartial.user = { id: "client-user-id" } as any;
+  clientPartial.application = undefined;
 
   clientPartial.once = ((event: any, listener: any) => {
     onceMock(event, listener);
@@ -283,12 +450,14 @@ function createClientStub(
     return clientPartial as Client;
   }) as Client["on"];
 
+  clientPartial.destroy = (async () => destroyMock()) as Client["destroy"];
   clientPartial.login = ((token?: string) => loginMock(token)) as Client["login"];
 
   return {
     client: clientPartial as MinimalClient,
     onceMock,
     onMock,
+    destroyMock,
     loginMock,
   };
 }
